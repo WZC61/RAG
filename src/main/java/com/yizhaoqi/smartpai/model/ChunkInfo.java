@@ -12,7 +12,7 @@ import lombok.Data;
 @Entity
 @Table(
         name = "chunk_info",
-        uniqueConstraints = @UniqueConstraint(name = "uk_file_md5_chunk_index", columnNames = {"file_md5", "chunk_index"})
+        uniqueConstraints = @UniqueConstraint(name = "uk_user_file_md5_chunk_index", columnNames = {"user_id", "file_md5", "chunk_index"})
 )
 public class ChunkInfo {
     /**
@@ -22,6 +22,10 @@ public class ChunkInfo {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    /** 上传用户，分片业务身份的一部分。 */
+    @Column(name = "user_id", nullable = false, length = 64)
+    private String userId;
 
     /**
      * 文件的MD5值

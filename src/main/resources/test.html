@@ -704,10 +704,12 @@
         }
 
         // 添加单个分片上传函数
-        function uploadChunk(chunk, metadata) {
+        async function uploadChunk(chunk, metadata) {
+            const chunkMd5 = await calculateMD5(chunk);
             return new Promise((resolve, reject) => {
                 const formData = new FormData();
                 formData.append('file', chunk);
+                formData.append('chunkMd5', chunkMd5);
                 
                 const xhr = new XMLHttpRequest();
                 
@@ -893,4 +895,4 @@
         }
     </script>
 </body>
-</html> 
+</html>

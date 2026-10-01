@@ -891,12 +891,14 @@
         }
 
         // 单个分片上传
-        function uploadChunk(chunk, metadata) {
+        async function uploadChunk(chunk, metadata) {
+            const chunkMd5 = await calculateMD5(chunk);
             return new Promise((resolve, reject) => {
                 const formData = new FormData();
                 formData.append('file', chunk);
                 formData.append('fileMd5', metadata.fileMD5);
                 formData.append('chunkIndex', metadata.chunkIndex.toString());
+                formData.append('chunkMd5', chunkMd5);
                 formData.append('totalSize', metadata.totalSize.toString());
                 formData.append('fileName', metadata.fileName);
                 if (metadata.totalChunks) {
@@ -1278,4 +1280,4 @@
         });
     </script>
 </body>
-</html> 
+</html>

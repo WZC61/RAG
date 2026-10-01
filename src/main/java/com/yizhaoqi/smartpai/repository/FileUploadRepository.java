@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.time.LocalDateTime;
 
 @Repository
 public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
@@ -90,4 +91,12 @@ public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
     int updateStatusIfCurrent(@Param("id") Long id,
                               @Param("currentStatus") int currentStatus,
                               @Param("newStatus") int newStatus);
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("UPDATE FileUpload f SET f.status = :newStatus, f.mergedAt = :mergedAt WHERE f.id = :id AND f.status = :currentStatus")
+    int updateUploadCompletionIfCurrent(@Param("id") Long id,
+                                        @Param("currentStatus") int currentStatus,
+                                        @Param("newStatus") int newStatus,
+                                        @Param("mergedAt") LocalDateTime mergedAt);
 }

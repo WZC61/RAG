@@ -45,11 +45,12 @@ CREATE TABLE file_upload (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传记录';
 CREATE TABLE chunk_info (
                             id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '分块记录唯一标识',
+                             user_id VARCHAR(64) NOT NULL COMMENT '上传用户 ID',
                             file_md5 VARCHAR(32) NOT NULL COMMENT '关联的文件MD5值',
                             chunk_index INT NOT NULL COMMENT '分块序号',
                             chunk_md5 VARCHAR(32) NOT NULL COMMENT '分块的MD5值',
                             storage_path VARCHAR(255) NOT NULL COMMENT '分块在存储系统中的路径',
-                            UNIQUE KEY uk_file_md5_chunk_index (file_md5, chunk_index)
+                             UNIQUE KEY uk_user_file_md5_chunk_index (user_id, file_md5, chunk_index)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件分块信息表';
 
 CREATE TABLE document_vectors (

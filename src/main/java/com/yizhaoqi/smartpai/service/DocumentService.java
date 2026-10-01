@@ -165,7 +165,7 @@ public class DocumentService {
 
             // 删除分片元数据，避免同 MD5 文件再次上传时误判分片已经存在
             try {
-                int deletedChunkRows = chunkInfoRepository.deleteByFileMd5(fileMd5);
+                int deletedChunkRows = chunkInfoRepository.deleteByUserIdAndFileMd5(userId, fileMd5);
                 logger.info("成功删除文档分片元数据: fileMd5={}, deletedRows={}", fileMd5, deletedChunkRows);
             } catch (Exception e) {
                 logger.error("删除文档分片元数据时出错: {}", fileMd5, e);

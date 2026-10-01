@@ -5,6 +5,8 @@ import com.yizhaoqi.smartpai.exception.CustomException;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.OrganizationTag;
+import com.yizhaoqi.smartpai.model.UploadInitRequest;
+import jakarta.validation.Valid;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.service.FileTypeValidationService;
 import com.yizhaoqi.smartpai.service.ParseService;
@@ -57,6 +59,51 @@ public class UploadController {
         this.kafkaTemplate = kafkaTemplate;
     }
 
+    @PostMapping("/init")
+    public ResponseEntity<Map<String, Object>> initializeUpload(
+            @Valid @RequestBody UploadInitRequest request,
+            @RequestAttribute("userId") String userId) {
+        try {
+            FileTypeValidationService.FileTypeValidationResult validation = fileTypeValidationService.validateFileType(request.fileName());
+            if (!validation.isValid()) {
+                throw new CustomException(validation.getMessage(), HttpStatus.BAD_REQUEST);
+            }
+            String orgTag = request.orgTag();
+            if (orgTag == null || orgTag.isBlank()) {
+                orgTag = userService.getUserPrimaryOrg(userId);
+            }
+            // Instant uploads must not bypass the checks previously applied to chunks.
+            if (!userService.isAdminUser(userId)) {
+                Long maxSize = userService.getOrganizationTag(orgTag).getUploadMaxSizeBytes();
+                if (maxSize != null && maxSize > 0 && request.totalSize() > maxSize) {
+                    throw new CustomException("当前组织限制非管理员上传文件不超过 " + formatSize(maxSize), HttpStatus.PAYLOAD_TOO_LARGE);
+                }
+            }
+            FileUpload file = uploadService.initializeUpload(request.fileMd5(), request.totalSize(), request.fileName(),
+                    orgTag, request.isPublic(), userId);
+            boolean completed = file.getStatus() == FileUpload.STATUS_COMPLETED;
+            Map<String, Object> data = new HashMap<>();
+            data.put("instantUpload", completed);
+            data.put("needsUpload", !completed);
+            data.put("id", file.getId());
+            data.put("status", file.getStatus());
+            data.put("mergedAt", file.getMergedAt());
+            data.put("vectorizationStatus", file.getVectorizationStatus());
+            data.put("vectorizationErrorMessage", file.getVectorizationErrorMessage());
+            Map<String, Object> response = new HashMap<>();
+            response.put("code", 200);
+            response.put("message", completed ? "文件已存在，上传已完成" : "初始化成功，请上传分片");
+            response.put("data", data);
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            return ResponseEntity.status(e.getStatus()).body(Map.of("code", e.getStatus().value(), "message", e.getMessage()));
+        } catch (Exception e) {
+            LogUtils.logBusinessError("INIT_UPLOAD", userId, "初始化上传失败: fileMd5=%s", e, request.fileMd5());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("code", 500, "message", "初始化上传失败，请稍后重试"));
+        }
+    }
+
     /**
      * 上传文件分片接口
      *
@@ -68,13 +115,14 @@ public class UploadController {
      * @param orgTag 组织标签，如果未指定则使用用户的主组织标签
      * @param isPublic 是否公开，默认为false
      * @param file 分片文件对象
-     * @return 返回包含已上传分片和上传进度的响应
+     * @return 返回分片确认结果或已上传分片列表
      * @throws IOException 当文件读写发生错误时抛出
      */
     @PostMapping("/chunk")
     public ResponseEntity<Map<String, Object>> uploadChunk(
             @RequestParam("fileMd5") String fileMd5,
             @RequestParam("chunkIndex") int chunkIndex,
+            @RequestParam("chunkMd5") String chunkMd5,
             @RequestParam("totalSize") long totalSize,
             @RequestParam("fileName") String fileName,
             @RequestParam(value = "totalChunks", required = false) Integer totalChunks,
@@ -154,21 +202,14 @@ public class UploadController {
         
             LogUtils.logFileOperation(userId, "UPLOAD_CHUNK", fileName, fileMd5, "PROCESSING");
         
-            uploadService.uploadChunk(fileMd5, chunkIndex, totalSize, fileName, file, orgTag, isPublic, userId);
+            uploadService.uploadChunk(fileMd5, chunkIndex, totalSize, fileName, file, orgTag, isPublic, userId, chunkMd5);
             
-            List<Integer> uploadedChunks = uploadService.getUploadedChunks(fileMd5, userId);
-            int actualTotalChunks = uploadService.getTotalChunks(fileMd5, userId);
-            double progress = calculateProgress(uploadedChunks, actualTotalChunks);
-            
-            LogUtils.logBusiness("UPLOAD_CHUNK", userId, "分片上传成功: fileMd5=%s, fileName=%s, fileType=%s, chunkIndex=%d, 进度=%.2f%%", 
-                    fileMd5, fileName, fileType, chunkIndex, progress);
             monitor.end("分片上传成功");
             
             // 构建数据对象
             Map<String, Object> data = new HashMap<>();
-            data.put("uploaded", uploadedChunks);
-            data.put("progress", progress);
-            
+            data.put("chunkIndex", chunkIndex);
+
             // 构建统一响应格式
             Map<String, Object> response = new HashMap<>();
             response.put("code", 200);
@@ -198,7 +239,7 @@ public class UploadController {
      * 获取文件上传状态接口
      *
      * @param fileMd5 文件的MD5值，用于唯一标识文件
-     * @return 返回包含已上传分片和上传进度的响应
+     * @return 返回分片确认结果或已上传分片列表
      */
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getUploadStatus(@RequestParam("file_md5") String fileMd5, @RequestAttribute("userId") String userId) {
@@ -208,7 +249,7 @@ public class UploadController {
             String fileName = "unknown";
             String fileType = "unknown";
             try {
-                Optional<FileUpload> fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5);
+                Optional<FileUpload> fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId);
                 if (fileUpload.isPresent()) {
                     fileName = fileUpload.get().getFileName();
                     fileType = getFileType(fileName);
@@ -222,16 +263,16 @@ public class UploadController {
             
             List<Integer> uploadedChunks = uploadService.getUploadedChunks(fileMd5, userId);
             int totalChunks = uploadService.getTotalChunks(fileMd5, userId);
-            double progress = calculateProgress(uploadedChunks, totalChunks);
+
             
-            LogUtils.logBusiness("GET_UPLOAD_STATUS", "system", "文件上传状态: fileMd5=%s, fileName=%s, fileType=%s, 已上传=%d/%d, 进度=%.2f%%", 
-                    fileMd5, fileName, fileType, uploadedChunks.size(), totalChunks, progress);
+            LogUtils.logBusiness("GET_UPLOAD_STATUS", "system", "文件上传状态: fileMd5=%s, fileName=%s, fileType=%s, 已上传=%d/%d",
+                    fileMd5, fileName, fileType, uploadedChunks.size(), totalChunks);
             monitor.end("获取上传状态成功");
             
             // 构建数据对象
             Map<String, Object> data = new HashMap<>();
-            data.put("uploaded", uploadedChunks);
-            data.put("progress", progress);
+            data.put("uploadedChunks", uploadedChunks);
+            data.put("totalChunks", totalChunks);
             data.put("fileName", fileName);
             data.put("fileType", fileType);
             
@@ -302,21 +343,6 @@ public class UploadController {
             
             LogUtils.logBusiness("MERGE_FILE", userId, "权限验证通过，开始合并文件: fileMd5=%s, fileName=%s, fileType=%s", request.fileMd5(), request.fileName(), fileType);
             
-            // 检查分片是否全部上传完成
-            List<Integer> uploadedChunks = uploadService.getUploadedChunks(request.fileMd5(), userId);
-            int totalChunks = uploadService.getTotalChunks(request.fileMd5(), userId);
-            LogUtils.logBusiness("MERGE_FILE", userId, "分片上传状态: fileMd5=%s, fileName=%s, 已上传=%d/%d", 
-                    request.fileMd5(), request.fileName(), uploadedChunks.size(), totalChunks);
-            
-            if (uploadedChunks.size() < totalChunks) {
-                LogUtils.logUserOperation(userId, "MERGE_FILE", request.fileMd5(), "FAILED_INCOMPLETE_CHUNKS");
-                monitor.end("合并失败：分片未全部上传");
-                Map<String, Object> errorResponse = new HashMap<>();
-                errorResponse.put("code", HttpStatus.BAD_REQUEST.value());
-                errorResponse.put("message", "文件分片未全部上传，无法合并");
-                return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
-            }
-
             int updatedRows = fileUploadRepository.updateStatusIfCurrent(
                     fileUpload.getId(),
                     FileUpload.STATUS_UPLOADING,
@@ -336,13 +362,11 @@ public class UploadController {
                 throw new CustomException("文件状态已变化，请刷新后重试", HttpStatus.CONFLICT);
             }
 
-            fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
-                    .orElseThrow(() -> new RuntimeException("文件记录不存在"));
-
             // 合并文件
-            LogUtils.logBusiness("MERGE_FILE", userId, "开始合并文件分片: fileMd5=%s, fileName=%s, fileType=%s, 分片数量=%d", request.fileMd5(), request.fileName(), fileType, totalChunks);
             String objectUrl;
             try {
+                // All source checks run after CAS and share the same failure recovery path.
+                LogUtils.logBusiness("MERGE_FILE", userId, "开始合并文件分片: fileMd5=%s, fileName=%s, fileType=%s", request.fileMd5(), request.fileName(), fileType);
                 objectUrl = uploadService.mergeChunks(request.fileMd5(), request.fileName(), userId);
             } catch (Exception mergeException) {
                 fileUploadRepository.updateStatusIfCurrent(fileUpload.getId(), FileUpload.STATUS_MERGING, FileUpload.STATUS_UPLOADING);
@@ -454,21 +478,6 @@ public class UploadController {
         response.put("message", "文件已完成合并");
         response.put("data", data);
         return ResponseEntity.ok(response);
-    }
-
-    /**
-     * 计算上传进度
-     *
-     * @param uploadedChunks 已上传的分片列表
-     * @param totalChunks 总分片数量
-     * @return 返回上传进度的百分比
-     */
-    private double calculateProgress(List<Integer> uploadedChunks, int totalChunks) {
-        if (totalChunks == 0) {
-            LogUtils.logBusiness("CALCULATE_PROGRESS", "system", "计算上传进度时总分片数为0");
-            return 0.0;
-        }
-        return (double) uploadedChunks.size() / totalChunks * 100;
     }
 
     private String formatSize(long sizeInBytes) {

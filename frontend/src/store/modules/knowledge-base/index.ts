@@ -17,17 +17,19 @@ export const useKnowledgeBaseStore = defineStore(SetupStoreId.KnowledgeBase, () 
     const chunkStart = chunkIndex * chunkSize;
     const chunkEnd = Math.min(chunkStart + chunkSize, task.totalSize);
     const chunk = task.file.slice(chunkStart, chunkEnd);
+    const chunkMd5 = await calculateMD5(chunk);
 
     const requestId = nanoid();
     task.requestIds ??= [];
     task.requestIds.push(requestId);
-    const { error, data } = await request<Api.KnowledgeBase.Progress>({
+    const { error } = await request<Api.KnowledgeBase.ChunkUploadResult>({
       url: '/upload/chunk',
       method: 'POST',
       data: {
         file: chunk,
         fileMd5: task.fileMd5,
         chunkIndex,
+        chunkMd5,
         totalSize: task.totalSize,
         fileName: task.fileName,
         orgTag: task.orgTag,
@@ -49,7 +51,7 @@ export const useKnowledgeBaseStore = defineStore(SetupStoreId.KnowledgeBase, () 
     if (!updatedTask) return true;
 
     updatedTask.chunkIndex = chunkIndex;
-    updatedTask.uploadedChunks = mergeUploadedChunks(updatedTask.uploadedChunks, data.uploaded);
+    updatedTask.uploadedChunks = mergeUploadedChunks(updatedTask.uploadedChunks, [chunkIndex]);
     updatedTask.progress = Number.parseFloat(((updatedTask.uploadedChunks.length / totalChunks) * 100).toFixed(2));
 
     return true;
@@ -131,8 +133,8 @@ export const useKnowledgeBaseStore = defineStore(SetupStoreId.KnowledgeBase, () 
     if (existingTask) {
       // 如果存在相同文件，直接返回该上传任务
       if (existingTask.status === UploadStatus.Completed) {
-        window.$message?.error('文件已存在');
-        return;
+        // Recheck storage through init when the user selects a completed file again.
+        tasks.value = tasks.value.filter(t => t !== existingTask);
       } else if (existingTask.status === UploadStatus.Pending || existingTask.status === UploadStatus.Uploading) {
         window.$message?.error('文件正在上传中');
         return;
@@ -191,6 +193,40 @@ export const useKnowledgeBaseStore = defineStore(SetupStoreId.KnowledgeBase, () 
     const totalChunks = Math.ceil(task.totalSize / chunkSize);
 
     try {
+      const { error, data } = await request<Api.KnowledgeBase.UploadInitResult>({
+        url: '/upload/init',
+        method: 'POST',
+        data: {
+          fileMd5: task.fileMd5,
+          fileName: task.fileName,
+          totalSize: task.totalSize,
+          totalChunks,
+          orgTag: task.orgTag,
+          isPublic: task.isPublic ?? false
+        }
+      });
+      if (error || !data) throw new Error('上传初始化失败');
+
+      task.id = data.id;
+      task.mergedAt = data.mergedAt ?? undefined;
+      task.vectorizationStatus = data.vectorizationStatus;
+      task.vectorizationErrorMessage = data.vectorizationErrorMessage;
+      if (data.instantUpload) {
+        task.status = UploadStatus.Completed;
+        task.progress = 100;
+        window.$message?.success('文件已存在，上传已完成');
+        return;
+      }
+      if (!data.needsUpload) throw new Error('上传初始化结果无效');
+
+      const statusResult = await request<Api.KnowledgeBase.UploadStatusResult>({
+        url: '/upload/status',
+        params: { file_md5: task.fileMd5 }
+      });
+      if (statusResult.error || !statusResult.data) throw new Error('查询上传状态失败');
+      task.uploadedChunks = mergeUploadedChunks([], statusResult.data.uploadedChunks);
+      task.progress = Number.parseFloat(((task.uploadedChunks.length / totalChunks) * 100).toFixed(2));
+
       if (task.uploadedChunks.length === totalChunks) {
         const success = await mergeFile(task);
         if (!success) throw new Error('文件合并失败');

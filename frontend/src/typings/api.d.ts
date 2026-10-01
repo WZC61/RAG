@@ -378,10 +378,23 @@ declare namespace Api {
 
     type Merge = Pick<UploadTask, 'fileMd5' | 'fileName'>;
 
-    interface Progress {
-      uploaded: number[];
-      progress: number;
+    interface UploadInitResult {
+      instantUpload: boolean;
+      needsUpload: boolean;
+      id: number;
+      status: number;
+      mergedAt: string | null;
+      vectorizationStatus: UploadTask['vectorizationStatus'];
+      vectorizationErrorMessage: string | null;
+    }
+
+    interface UploadStatusResult {
+      uploadedChunks: number[];
       totalChunks: number;
+    }
+
+    interface ChunkUploadResult {
+      chunkIndex: number;
     }
 
     interface MergeResult {

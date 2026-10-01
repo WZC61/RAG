@@ -69,7 +69,7 @@ export function fileSize(size: number) {
   return `${(size / 1024 / 1024 / 1024).toFixed(2)}G`;
 }
 
-export async function calculateMD5(file: File): Promise<string> {
+export async function calculateMD5(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunkSize = 5 * 1024 * 1024; // 5MB
     const spark = new SparkMD5.ArrayBuffer();

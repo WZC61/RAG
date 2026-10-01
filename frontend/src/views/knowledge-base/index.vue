@@ -492,21 +492,12 @@ async function onBeforeUpload(
     return false;
   }
   loading.value = true;
-  const { error, data: progress } = await request<Api.KnowledgeBase.Progress>({
-    url: '/upload/status',
-    params: { file_md5: row.fileMd5 }
-  });
-  if (!error) {
-    row.file = options.file.file!;
-    row.status = UploadStatus.Pending;
-    row.progress = progress.progress;
-    row.uploadedChunks = progress.uploaded;
-    store.startUpload();
-    loading.value = false;
-    return true;
-  }
+  row.file = options.file.file!;
+  row.status = UploadStatus.Pending;
+  // The store performs init, then refreshes confirmed chunks from MySQL before resuming.
+  store.startUpload();
   loading.value = false;
-  return false;
+  return true;
 }
 </script>
 
