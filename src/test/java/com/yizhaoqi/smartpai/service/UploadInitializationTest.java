@@ -1,7 +1,12 @@
 package com.yizhaoqi.smartpai.service;
 
 import com.yizhaoqi.smartpai.exception.CustomException;
-import com.yizhaoqi.smartpai.model.FileUpload;
+import com.yizhaoqi.smartpai.model.*;
+import com.yizhaoqi.smartpai.repository.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
 import com.yizhaoqi.smartpai.repository.ChunkInfoRepository;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import io.minio.MinioClient;
@@ -30,6 +35,9 @@ class UploadInitializationTest {
     private static LocalContainerEntityManagerFactoryBean factory;
     private static TransactionTemplate transaction;
     private static FileUploadRepository repository;
+    private static FileContentRepository contents;
+    private static ProcessingOutboxRepository outbox;
+    private static UploadCompletionService completion;
     private UploadService service;
     private MinioClient minio;
     private ChunkInfoRepository chunks;
@@ -38,14 +46,23 @@ class UploadInitializationTest {
     @BeforeAll
     static void createDatabase() {
         factory = new LocalContainerEntityManagerFactoryBean();
-        factory.setDataSource(new DriverManagerDataSource("jdbc:h2:mem:upload-init;DB_CLOSE_DELAY=-1", "sa", ""));
-        factory.setManagedTypes(PersistenceManagedTypes.of(FileUpload.class.getName()));
+        factory.setDataSource(new DriverManagerDataSource("jdbc:h2:mem:upload-init;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", ""));
+        factory.setManagedTypes(PersistenceManagedTypes.of(FileUpload.class.getName(), FileContent.class.getName(), ProcessingOutbox.class.getName()));
         factory.setJpaVendorAdapter(new HibernateJpaVendorAdapter());
         factory.setJpaPropertyMap(Map.of("hibernate.hbm2ddl.auto", "create-drop"));
         factory.afterPropertiesSet();
-        transaction = new TransactionTemplate(new JpaTransactionManager(factory.getObject()));
-        repository = new JpaRepositoryFactory(SharedEntityManagerCreator.createSharedEntityManager(factory.getObject()))
-                .getRepository(FileUploadRepository.class);
+        JpaTransactionManager manager = new JpaTransactionManager(factory.getObject());
+        transaction = new TransactionTemplate(manager);
+        JpaRepositoryFactory repositories = new JpaRepositoryFactory(SharedEntityManagerCreator.createSharedEntityManager(factory.getObject()));
+        repositories.addRepositoryProxyPostProcessor((proxy, information) ->
+                proxy.addAdvice(new TransactionInterceptor(manager, new AnnotationTransactionAttributeSource())));
+        repository = repositories.getRepository(FileUploadRepository.class);
+        contents = repositories.getRepository(FileContentRepository.class);
+        outbox = repositories.getRepository(ProcessingOutboxRepository.class);
+        ProxyFactory proxy = new ProxyFactory(new UploadCompletionService(repository, contents, outbox, new ObjectMapper()));
+        proxy.setProxyTargetClass(true);
+        proxy.addAdvice(new TransactionInterceptor(manager, new AnnotationTransactionAttributeSource()));
+        completion = (UploadCompletionService) proxy.getProxy();
     }
 
     @AfterAll
@@ -55,7 +72,9 @@ class UploadInitializationTest {
 
     @BeforeEach
     void setUp() {
-        transaction.executeWithoutResult(status -> repository.deleteAllInBatch());
+        transaction.executeWithoutResult(status -> {
+            outbox.deleteAllInBatch(); contents.deleteAllInBatch(); repository.deleteAllInBatch();
+        });
         minio = mock(MinioClient.class);
         chunks = mock(ChunkInfoRepository.class);
 
@@ -63,6 +82,8 @@ class UploadInitializationTest {
         ReflectionTestUtils.setField(service, "fileUploadRepository", repository);
         ReflectionTestUtils.setField(service, "minioClient", minio);
         ReflectionTestUtils.setField(service, "chunkInfoRepository", chunks);
+        ReflectionTestUtils.setField(service, "uploadCompletionService", completion);
+        ReflectionTestUtils.setField(service, "transactionManager", transaction.getTransactionManager());
 
     }
 
@@ -92,6 +113,8 @@ class UploadInitializationTest {
         assertNotNull(result.getMergedAt());
         assertEquals("1", result.getUserId());
         assertNull(result.getVectorizationStatus());
+        assertEquals(FileContent.ProcessingStatus.MERGED, contents.findByFileMd5("md5").orElseThrow().getProcessingStatus());
+        assertEquals(1, outbox.count());
         assertEquals(FileUpload.STATUS_COMPLETED,
                 repository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc("md5", "1").orElseThrow().getStatus());
         verifyNoInteractions(chunks);
@@ -115,6 +138,8 @@ class UploadInitializationTest {
         assertFalse(first.isPublic());
         assertEquals("TEAM_B", second.getOrgTag());
         assertTrue(second.isPublic());
+        assertEquals(1, contents.count());
+        assertEquals(1, outbox.count());
     }
 
     @Test
@@ -185,7 +210,25 @@ class UploadInitializationTest {
     }
 
     private FileUpload initialize(String userId, String orgTag, boolean isPublic) {
-        return transaction.execute(status -> service.initializeUpload("md5", 1024L, "test.pdf", orgTag, isPublic, userId));
+        return service.initializeUpload("md5", 1024L, "test.pdf", orgTag, isPublic, userId);
+    }
+
+    @Test
+    void indexedContentInstantUploadDoesNotScheduleAnotherProcessingTask() throws Exception {
+        mergedExists();
+        initialize("1", "TEAM_A", false);
+        transaction.executeWithoutResult(tx -> {
+            FileContent content = contents.findByFileMd5("md5").orElseThrow();
+            content.setProcessingStatus(FileContent.ProcessingStatus.INDEXED);
+            contents.saveAndFlush(content);
+            outbox.deleteAllInBatch();
+        });
+        FileUpload second = initialize("2", "TEAM_B", false);
+        assertEquals(FileUpload.STATUS_COMPLETED, second.getStatus());
+        assertEquals(2, repository.count());
+        assertEquals(1, contents.count());
+        assertEquals(0, outbox.count());
+        verifyNoInteractions(chunks);
     }
 
     private void mergedExists() throws Exception {

@@ -44,18 +44,26 @@ spring:
     consumer:
       group-id: file-processing-group
       auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 1
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        isolation.level: read_committed
+        max.poll.interval.ms: ${SPRING_KAFKA_MAX_POLL_INTERVAL_MS:1800000}
         spring.json.trusted.packages: "*"
         client.dns.lookup: use_all_dns_ips
+    listener:
+      concurrency: ${SPRING_KAFKA_CONSUMER_CONCURRENCY:3}
+      ack-mode: record
     topic:
       # 文件上传完成后进入该主题，消费者会顺序完成“解析 + 向量化”
       file-processing: file-processing-topic1
       # 消费失败并重试耗尽后进入死信主题
       dlt: file-processing-dlt
-      # 启动时自动建 topic 的默认参数，本地单机通常保持 1/1
-      partitions: ${SPRING_KAFKA_TOPIC_PARTITIONS:1}
+      # 单应用实例：3 分区 / 3 Consumer，副本数按 Broker 数配置
+      partitions: ${SPRING_KAFKA_TOPIC_PARTITIONS:3}
       replication-factor: ${SPRING_KAFKA_TOPIC_REPLICATION_FACTOR:1}
   webflux:
     client:
@@ -85,6 +93,9 @@ admin:
     org-tags: ${ADMIN_BOOTSTRAP_ORG_TAGS:default,admin}
 
 app:
+  processing-outbox:
+    fixed-delay-ms: ${PROCESSING_OUTBOX_FIXED_DELAY_MS:5000}
+    batch-size: ${PROCESSING_OUTBOX_BATCH_SIZE:50}
   auth:
     registration:
       # OPEN: 开放注册

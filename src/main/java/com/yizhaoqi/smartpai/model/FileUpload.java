@@ -77,21 +77,27 @@ public class FileUpload {
     private boolean isPublic = false;
 
     @Column(name = "estimated_embedding_tokens")
+    @Deprecated // Compatibility for document listing / legacy REINDEX; new processing uses FileContent.
     private Long estimatedEmbeddingTokens;
 
     @Column(name = "estimated_chunk_count")
+    @Deprecated
     private Integer estimatedChunkCount;
 
     @Column(name = "actual_embedding_tokens")
+    @Deprecated
     private Long actualEmbeddingTokens;
 
     @Column(name = "actual_chunk_count")
+    @Deprecated
     private Integer actualChunkCount;
 
     @Column(name = "vectorization_status", length = 32)
+    @Deprecated
     private String vectorizationStatus;
 
     @Column(name = "vectorization_error_message", length = 1000)
+    @Deprecated
     private String vectorizationErrorMessage;
 
     /**

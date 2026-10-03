@@ -257,7 +257,7 @@ public class DocumentService {
         );
 
         kafkaTemplate.executeInTransaction(kt -> {
-            kt.send(kafkaConfig.getFileProcessingTopic(), task);
+            kt.send(kafkaConfig.getFileProcessingTopic(), task.getFileMd5(), task);
             return true;
         });
 

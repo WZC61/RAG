@@ -2,6 +2,10 @@ package com.yizhaoqi.smartpai.consumer;
 
 import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
+import com.yizhaoqi.smartpai.model.FileUpload;
+import com.yizhaoqi.smartpai.model.FileContent;
+import com.yizhaoqi.smartpai.repository.FileUploadRepository;
+import com.yizhaoqi.smartpai.service.FileContentProcessingService;
 import com.yizhaoqi.smartpai.service.DocumentService;
 import com.yizhaoqi.smartpai.service.ParseService;
 import com.yizhaoqi.smartpai.service.VectorizationService;
@@ -26,6 +30,10 @@ public class FileProcessingConsumer {
     private final DocumentService documentService;
     @Autowired
     private KafkaConfig kafkaConfig;
+    @Autowired
+    private FileContentProcessingService contentProcessing;
+    @Autowired
+    private FileUploadRepository files;
 
 
     public FileProcessingConsumer(
@@ -40,11 +48,28 @@ public class FileProcessingConsumer {
 
     @KafkaListener(topics = "#{kafkaConfig.getFileProcessingTopic()}", groupId = "#{kafkaConfig.getFileProcessingGroupId()}")
     public void processTask(FileProcessingTask task) {
+        if (task == null) throw new IllegalArgumentException("Missing file processing task");
         log.info("Received task: {}", task);
         log.info("文件权限信息: userId={}, orgTag={}, isPublic={}", 
                 task.getUserId(), task.getOrgTag(), task.isPublic());
 
-        documentService.markVectorizationProcessing(task.getFileMd5(), false);
+        boolean contentTask = FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(task.getTaskType());
+        long generation = contentTask && task.getProcessingGeneration() != null ? task.getProcessingGeneration() : 0;
+        FileContent.ProcessingStatus checkpoint = null;
+        if (contentTask) {
+            if (!task.hasValidContentIdentity()) {
+                throw new IllegalArgumentException("Invalid content processing identity");
+            }
+            checkpoint = contentProcessing.checkpoint(task.getFileMd5(), generation);
+            if (checkpoint == null || checkpoint == FileContent.ProcessingStatus.INDEXED
+                    || checkpoint == FileContent.ProcessingStatus.FAILED) return;
+        } else {
+            if (!FileProcessingTask.TASK_TYPE_UPLOAD_PROCESS.equals(task.getTaskType())
+                    && !FileProcessingTask.TASK_TYPE_REINDEX.equals(task.getTaskType())) {
+                throw new IllegalArgumentException("Unsupported file processing task type");
+            }
+            documentService.markVectorizationProcessing(task.getFileMd5(), false);
+        }
 
         if (FileProcessingTask.TASK_TYPE_REINDEX.equals(task.getTaskType())) {
             processReindexTask(task);
@@ -53,35 +78,45 @@ public class FileProcessingConsumer {
 
         InputStream fileStream = null;
         try {
-            // 下载文件
-            fileStream = downloadFileFromStorage(task.getFilePath());
-            // 在 downloadFileFromStorage 返回后立即检查流是否可读
-            if (fileStream == null) {
-                throw new IOException("流为空");
+            // Temporary adapter for unchanged user-scoped parse/vector APIs. These are not
+            // content identity or an aggregate ACL; the ACL model is migrated in a later phase.
+            FileUpload legacyAccess = contentTask
+                    ? files.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(task.getFileMd5(), task.getRequesterId())
+                        .or(() -> files.findFirstByFileMd5OrderByCreatedAtDesc(task.getFileMd5())).orElseThrow()
+                    : null;
+            String legacyUser = contentTask ? legacyAccess.getUserId() : task.getUserId();
+            String legacyOrg = contentTask ? legacyAccess.getOrgTag() : task.getOrgTag();
+            boolean legacyPublic = contentTask ? legacyAccess.isPublic() : task.isPublic();
+            // PARSED is a durable checkpoint: retries need neither download nor parse again.
+            // Same-md5 partition ordering is the normal concurrency guard, not a processing lease.
+            if (!contentTask || checkpoint == FileContent.ProcessingStatus.MERGED) {
+                fileStream = downloadFileFromStorage(task.getFilePath());
+                if (fileStream == null) throw new IOException("流为空");
+                if (!fileStream.markSupported()) fileStream = new BufferedInputStream(fileStream);
+                parseService.parseAndSave(task.getFileMd5(), fileStream, legacyUser, legacyOrg, legacyPublic);
+                if (contentTask) contentProcessing.parsed(task.getFileMd5(), generation);
+                log.info("文件解析完成，fileMd5: {}", task.getFileMd5());
             }
-
-            // 强制转换为可缓存流
-            if (!fileStream.markSupported()) {
-                fileStream = new BufferedInputStream(fileStream);
-            }
-
-            // 解析文件
-            parseService.parseAndSave(task.getFileMd5(), fileStream, 
-                    task.getUserId(), task.getOrgTag(), task.isPublic());
-            log.info("文件解析完成，fileMd5: {}", task.getFileMd5());
 
             // 向量化处理
             VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
                     task.getFileMd5(),
-                    task.getUserId(),
-                    task.getOrgTag(),
-                    task.isPublic(),
-                    task.getUserId()
+                    legacyUser,
+                    legacyOrg,
+                    legacyPublic,
+                    contentTask ? task.getRequesterId() : task.getUserId()
             );
-            documentService.markVectorizationCompleted(task.getFileMd5(), vectorizationResult);
+            if (contentTask) contentProcessing.indexed(task.getFileMd5(), generation, vectorizationResult);
+            else documentService.markVectorizationCompleted(task.getFileMd5(), vectorizationResult);
             log.info("向量化完成，fileMd5: {}", task.getFileMd5());
         } catch (Exception e) {
-            documentService.markVectorizationFailed(task.getFileMd5(), e);
+            if (contentTask) {
+                try {
+                    contentProcessing.recordError(task.getFileMd5(), generation, e);
+                } catch (Exception persistenceFailure) {
+                    e.addSuppressed(persistenceFailure); // Preserve the business failure for Kafka retry.
+                }
+            } else documentService.markVectorizationFailed(task.getFileMd5(), e);
             log.error("Error processing task: {}", task, e);
             // 抛出异常让 Kafka 的 DefaultErrorHandler 捕获并触发重试 / 死信
             throw new RuntimeException("Error processing task", e);

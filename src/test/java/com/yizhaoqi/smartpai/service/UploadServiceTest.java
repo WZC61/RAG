@@ -174,6 +174,8 @@ class UploadServiceTest {
 
     @Test
     void mergeStillQueriesAndCleansOnlyCurrentUsersChunks() throws Exception {
+        UploadCompletionService completion = mock(UploadCompletionService.class);
+        ReflectionTestUtils.setField(service, "uploadCompletionService", completion);
         when(chunks.findByUserIdAndFileMd5OrderByChunkIndexAsc("1", "md5")).thenReturn(List.of(row("1", md5)));
         StatObjectResponse stat = mock(StatObjectResponse.class);
         when(stat.size()).thenReturn(1024L);
@@ -182,6 +184,7 @@ class UploadServiceTest {
         assertEquals("https://example.com/merged/md5", service.mergeChunks("md5", "test.pdf", "1"));
         verify(minio, never()).composeObject(any());
         verify(chunks).deleteByUserIdAndFileMd5("1", "md5");
+        verify(completion).complete("1", "md5");
     }
 
     private void upload(String userId, String content, String checksum) throws Exception {

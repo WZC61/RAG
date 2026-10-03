@@ -44,6 +44,9 @@ public class UploadService {
     @Autowired
     private RedissonClient redissonClient;
 
+    @Autowired
+    private UploadCompletionService uploadCompletionService;
+
     // 分片事务使用 JPA 数据库事务管理器
     @Autowired
     @org.springframework.beans.factory.annotation.Qualifier("transactionManager")
@@ -73,7 +76,17 @@ public class UploadService {
             throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
         }
 
-        int targetStatus = mergedExists ? FileUpload.STATUS_COMPLETED : FileUpload.STATUS_UPLOADING;
+        if (mergedExists) {
+            try {
+                uploadCompletionService.completeInstantUpload(userId, fileMd5);
+                return fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId).orElseThrow();
+            } catch (CustomException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new CustomException("秒传完成事务失败，请重试", HttpStatus.SERVICE_UNAVAILABLE);
+            }
+        }
+        int targetStatus = FileUpload.STATUS_UPLOADING;
         if (fileUpload.getStatus() != targetStatus) {
             fileUploadRepository.updateUploadCompletionIfCurrent(fileUpload.getId(), fileUpload.getStatus(), targetStatus,
                     mergedExists ? LocalDateTime.now() : null);
@@ -83,8 +96,17 @@ public class UploadService {
                 throw new CustomException("文件状态已变化，请稍后重试", HttpStatus.CONFLICT);
             }
         }
-        // Vectorization metadata stays owned by the existing asynchronous processing flow.
         return fileUpload;
+    }
+
+    /** Repair content/event metadata even when a repeated merge sees an already completed upload. */
+    public void coordinateCompletedUpload(String fileMd5, String userId) throws Exception {
+        FileUpload file = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
+                .orElseThrow(() -> new CustomException("文件记录不存在", HttpStatus.NOT_FOUND));
+        if (!mergedObjectExists(fileMd5, file.getTotalSize())) {
+            throw new CustomException("最终文件不存在，请重新初始化上传", HttpStatus.CONFLICT);
+        }
+        uploadCompletionService.completeInstantUpload(userId, fileMd5);
     }
 
     private boolean mergedObjectExists(String fileMd5, long totalSize) {
@@ -397,6 +419,11 @@ public class UploadService {
         } catch (Exception e) {
             throw new CustomException("生成文件访问地址失败，请重试", HttpStatus.SERVICE_UNAVAILABLE);
         }
+        try {
+            uploadCompletionService.complete(file.getUserId(), file.getFileMd5());
+        } catch (Exception e) {
+            throw new CustomException("保存上传完成事件失败，请重新发起 merge", HttpStatus.SERVICE_UNAVAILABLE);
+        }
         for (ChunkInfo chunk : chunks) {
             try {
                 minioClient.removeObject(RemoveObjectArgs.builder().bucket("uploads")
@@ -405,10 +432,12 @@ public class UploadService {
                 logger.warn("删除临时分片失败 => userId: {}, path: {}", file.getUserId(), chunk.getStoragePath(), e);
             }
         }
-        chunkInfoRepository.deleteByUserIdAndFileMd5(file.getUserId(), file.getFileMd5());
-        file.setStatus(FileUpload.STATUS_COMPLETED);
-        file.setMergedAt(LocalDateTime.now());
-        fileUploadRepository.save(file);
+        try {
+            chunkInfoRepository.deleteByUserIdAndFileMd5(file.getUserId(), file.getFileMd5());
+        } catch (Exception e) {
+            // Completion and PENDING are already committed; cleanup cannot undo them.
+            logger.warn("清理已完成上传的分片记录失败 => userId: {}, fileMd5: {}", file.getUserId(), file.getFileMd5(), e);
+        }
         return url;
     }
 
@@ -494,8 +523,6 @@ public class UploadService {
                 fileUpload.setUserId(userId);
                 fileUpload.setOrgTag(orgTag);
                 fileUpload.setPublic(isPublic);
-                fileUpload.setVectorizationStatus(null);
-                fileUpload.setVectorizationErrorMessage(null);
 
                 try {
                     return fileUploadRepository.save(fileUpload);

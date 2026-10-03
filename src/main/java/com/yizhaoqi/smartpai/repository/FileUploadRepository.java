@@ -15,6 +15,15 @@ import java.time.LocalDateTime;
 
 @Repository
 public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("select f from FileUpload f where f.userId = :userId and f.fileMd5 = :fileMd5")
+    Optional<FileUpload> findForUploadCompletion(@Param("userId") String userId, @Param("fileMd5") String fileMd5);
+
+    @Transactional
+    @Modifying
+    @Query("update FileUpload f set f.estimatedEmbeddingTokens = :tokens, f.estimatedChunkCount = :chunks where f.id = :id")
+    int updateEstimates(@Param("id") Long id, @Param("tokens") Long tokens, @Param("chunks") Integer chunks);
+
     Optional<FileUpload> findFirstByFileMd5OrderByCreatedAtDesc(String fileMd5);
 
     List<FileUpload> findAllByFileMd5(String fileMd5);

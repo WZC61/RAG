@@ -12,6 +12,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 public class FileProcessingTask {
     public static final String TASK_TYPE_UPLOAD_PROCESS = "UPLOAD_PROCESS";
+    public static final String TASK_TYPE_PROCESS_CONTENT = "PROCESS_CONTENT";
     public static final String TASK_TYPE_REINDEX = "REINDEX";
 
     private String fileMd5; // 文件的 MD5 校验值
@@ -22,6 +23,30 @@ public class FileProcessingTask {
     private boolean isPublic; // 文件是否公开
     private String taskType; // 任务类型
     private String requesterId; // 发起重试的用户
+    private String eventId; // 首次处理事件的稳定身份；旧消息/人工 REINDEX 可为空
+    private String objectPath;
+    private Long processingGeneration;
+
+    /** Shared by listener and DLT recovery; malformed tasks must never change content state. */
+    public boolean hasValidContentIdentity() {
+        return TASK_TYPE_PROCESS_CONTENT.equals(taskType)
+                && fileMd5 != null && !fileMd5.isBlank()
+                && processingGeneration != null && processingGeneration > 0
+                && ("merged/" + fileMd5).equals(objectPath)
+                && (TASK_TYPE_PROCESS_CONTENT + ":" + fileMd5 + ":" + processingGeneration).equals(eventId);
+    }
+
+    public FileProcessingTask(String fileMd5, String filePath, String fileName, String userId,
+                              String orgTag, boolean isPublic, String taskType, String requesterId) {
+        this.fileMd5 = fileMd5;
+        this.filePath = filePath;
+        this.fileName = fileName;
+        this.userId = userId;
+        this.orgTag = orgTag;
+        this.isPublic = isPublic;
+        this.taskType = taskType;
+        this.requesterId = requesterId;
+    }
     
     /**
      * 向后兼容的构造函数

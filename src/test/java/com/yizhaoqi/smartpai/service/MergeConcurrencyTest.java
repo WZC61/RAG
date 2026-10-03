@@ -1,9 +1,14 @@
 package com.yizhaoqi.smartpai.service;
 
-import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.controller.UploadController;
 import com.yizhaoqi.smartpai.model.ChunkInfo;
 import com.yizhaoqi.smartpai.model.FileUpload;
+import com.yizhaoqi.smartpai.model.FileContent;
+import com.yizhaoqi.smartpai.repository.FileContentRepository;
+import com.yizhaoqi.smartpai.model.ProcessingOutbox;
+import com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.aop.framework.ProxyFactory;
 import com.yizhaoqi.smartpai.repository.ChunkInfoRepository;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import io.minio.*;
@@ -17,7 +22,6 @@ import org.springframework.dao.support.PersistenceExceptionTranslationIntercepto
 import org.springframework.data.jpa.repository.support.JpaRepositoryFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.orm.jpa.JpaTransactionManager;
 import org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean;
 import org.springframework.orm.jpa.SharedEntityManagerCreator;
@@ -45,6 +49,9 @@ class MergeConcurrencyTest {
     private static TransactionTemplate transaction;
     private static ChunkInfoRepository chunks;
     private static FileUploadRepository files;
+    private static ProcessingOutboxRepository outbox;
+    private static FileContentRepository contents;
+    private static UploadCompletionService completion;
     private final Map<String, Long> objects = new ConcurrentHashMap<>();
     private final ReentrantLock mutex = new ReentrantLock();
     private MinioClient minio;
@@ -57,8 +64,8 @@ class MergeConcurrencyTest {
     @BeforeAll
     static void createDatabase() {
         factory = new LocalContainerEntityManagerFactoryBean();
-        factory.setDataSource(new DriverManagerDataSource("jdbc:h2:mem:merge-global;DB_CLOSE_DELAY=-1", "sa", ""));
-        factory.setManagedTypes(PersistenceManagedTypes.of(FileUpload.class.getName(), ChunkInfo.class.getName()));
+        factory.setDataSource(new DriverManagerDataSource("jdbc:h2:mem:merge-global;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", ""));
+        factory.setManagedTypes(PersistenceManagedTypes.of(FileUpload.class.getName(), ChunkInfo.class.getName(), ProcessingOutbox.class.getName(), FileContent.class.getName()));
         factory.setJpaVendorAdapter(new HibernateJpaVendorAdapter());
         factory.setJpaPropertyMap(Map.of("hibernate.hbm2ddl.auto", "create-drop"));
         factory.afterPropertiesSet();
@@ -72,6 +79,12 @@ class MergeConcurrencyTest {
         });
         chunks = repositories.getRepository(ChunkInfoRepository.class);
         files = repositories.getRepository(FileUploadRepository.class);
+        outbox = repositories.getRepository(ProcessingOutboxRepository.class);
+        contents = repositories.getRepository(FileContentRepository.class);
+        ProxyFactory proxy = new ProxyFactory(new UploadCompletionService(files, contents, outbox, new ObjectMapper()));
+        proxy.setProxyTargetClass(true);
+        proxy.addAdvice(new TransactionInterceptor(manager, new AnnotationTransactionAttributeSource()));
+        completion = (UploadCompletionService) proxy.getProxy();
     }
 
     @AfterAll
@@ -82,6 +95,8 @@ class MergeConcurrencyTest {
     @BeforeEach
     void setUp() throws Exception {
         transaction.executeWithoutResult(status -> {
+            outbox.deleteAllInBatch();
+            contents.deleteAllInBatch();
             chunks.deleteAllInBatch();
             files.deleteAllInBatch();
             for (String userId : List.of("1", "2")) {
@@ -139,11 +154,10 @@ class MergeConcurrencyTest {
         ReflectionTestUtils.setField(service, "chunkInfoRepository", chunks);
         ReflectionTestUtils.setField(service, "minioClient", minio);
         ReflectionTestUtils.setField(service, "redissonClient", client);
-        UploadController controller = new UploadController(service, mock(KafkaTemplate.class));
+        ReflectionTestUtils.setField(service, "uploadCompletionService", completion);
+        UploadController controller = new UploadController(service);
         ReflectionTestUtils.setField(controller, "fileUploadRepository", files);
-        KafkaConfig kafka = mock(KafkaConfig.class);
-        when(kafka.getFileProcessingTopic()).thenReturn("file-processing-topic");
-        ReflectionTestUtils.setField(controller, "kafkaConfig", kafka);
+        ReflectionTestUtils.setField(controller, "fileContentRepository", contents);
         ParseService parse = mock(ParseService.class);
         when(parse.estimateEmbeddingUsage(any())).thenThrow(new IOException("test skips downstream parsing"));
         ReflectionTestUtils.setField(controller, "parseService", parse);
@@ -375,6 +389,9 @@ class MergeConcurrencyTest {
         assertNotNull(file(userId).getMergedAt());
         assertEquals(List.of(), chunks.findChunkIndexesByUserIdAndFileMd5(userId, "md5"));
         assertFalse(objects.containsKey(path(userId)));
+        assertTrue(outbox.findByEventId(UploadCompletionService.initialEventId("md5", 1)).isPresent());
+        assertEquals(1, contents.count());
+        assertEquals(1, outbox.count());
     }
 
     private void assertRetryable(String userId) {

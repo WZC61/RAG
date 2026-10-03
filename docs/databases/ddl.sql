@@ -36,6 +36,8 @@ CREATE TABLE file_upload (
                              estimated_chunk_count INT DEFAULT NULL COMMENT '预估切片数',
                              actual_embedding_tokens BIGINT DEFAULT NULL COMMENT '实际 embedding token 数',
                              actual_chunk_count INT DEFAULT NULL COMMENT '实际切片数',
+                             vectorization_status VARCHAR(32) DEFAULT NULL COMMENT '兼容旧接口，新处理状态在 file_content',
+                             vectorization_error_message VARCHAR(1000) DEFAULT NULL COMMENT '兼容旧接口，新处理错误在 file_content',
                              created_at   TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                              merged_at    TIMESTAMP        NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '合并时间',
                              PRIMARY KEY (id),
@@ -43,6 +45,42 @@ CREATE TABLE file_upload (
                              INDEX idx_user (user_id),
                              INDEX idx_org_tag (org_tag)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传记录';
+CREATE TABLE file_content (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    file_md5 VARCHAR(32) NOT NULL,
+    object_path VARCHAR(255) NOT NULL,
+    total_size BIGINT NOT NULL,
+    processing_status VARCHAR(16) NOT NULL DEFAULT 'MERGED' COMMENT 'MERGED / PARSED / INDEXED / FAILED',
+    processing_error VARCHAR(1000) DEFAULT NULL,
+    processing_generation BIGINT NOT NULL DEFAULT 1,
+    estimated_embedding_tokens BIGINT DEFAULT NULL,
+    estimated_chunk_count INT DEFAULT NULL,
+    actual_embedding_tokens BIGINT DEFAULT NULL,
+    actual_chunk_count INT DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    indexed_at DATETIME DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_file_content_md5 (file_md5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='共享物理内容及处理状态，权限由 file_upload 决定';
+
+CREATE TABLE processing_outbox (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    event_id VARCHAR(96) NOT NULL,
+    file_md5 VARCHAR(32) NOT NULL,
+    user_id VARCHAR(64) DEFAULT NULL COMMENT '兼容旧事件，新 PROCESS_CONTENT 不使用用户身份',
+    event_type VARCHAR(32) NOT NULL,
+    payload LONGTEXT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    retry_count INT NOT NULL DEFAULT 0,
+    last_error VARCHAR(1000) DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at DATETIME DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_processing_outbox_event (event_id),
+    INDEX idx_processing_outbox_pending (status, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='首次文件处理可靠投递事件';
+
 CREATE TABLE chunk_info (
                             id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '分块记录唯一标识',
                              user_id VARCHAR(64) NOT NULL COMMENT '上传用户 ID',

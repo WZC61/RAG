@@ -44,16 +44,24 @@ spring:
     consumer:
       group-id: file-processing-group
       auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 1
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        isolation.level: read_committed
+        max.poll.interval.ms: ${SPRING_KAFKA_MAX_POLL_INTERVAL_MS:1800000}
         spring.json.trusted.packages: "*"
         client.dns.lookup: use_all_dns_ips
+    listener:
+      concurrency: ${SPRING_KAFKA_CONSUMER_CONCURRENCY:3}
+      ack-mode: record
     topic:
       file-processing: file-processing-topic1
       dlt: file-processing-dlt
-      # 单节点 Docker 环境通常保持 1/1 即可
-      partitions: ${SPRING_KAFKA_TOPIC_PARTITIONS:1}
+      # 单应用实例：3 分区 / 3 Consumer，单 Broker 使用 1 副本
+      partitions: ${SPRING_KAFKA_TOPIC_PARTITIONS:3}
       replication-factor: ${SPRING_KAFKA_TOPIC_REPLICATION_FACTOR:1}
   webflux:
     client:
