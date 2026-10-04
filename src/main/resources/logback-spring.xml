@@ -118,6 +118,9 @@
         <logger name="org.springframework.security" level="DEBUG"/>
     </springProfile>
 
+    <!-- A specific child level prevents signed WebClient URIs leaking through dev WEB DEBUG. -->
+    <logger name="org.springframework.web.reactive.function.client.ExchangeFunctions" level="INFO"/>
+
     <!-- 生产环境配置 -->
     <springProfile name="prod">
         <logger name="com.yizhaoqi.smartpai" level="INFO"/>
@@ -131,4 +134,4 @@
         <appender-ref ref="FILE"/>
         <appender-ref ref="ERROR_FILE"/>
     </root>
-</configuration> 
+</configuration>

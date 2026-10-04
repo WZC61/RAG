@@ -148,8 +148,12 @@ file:
     min-chunk-size: 100
     buffer-size: 8192
     max-memory-threshold: 0.8
+    figures:
+      connect-timeout-millis: ${FIGURE_IMAGE_CONNECT_TIMEOUT_MILLIS:10000}
+      read-timeout-millis: ${FIGURE_IMAGE_READ_TIMEOUT_MILLIS:30000}
+      max-image-bytes: ${FIGURE_IMAGE_MAX_BYTES:10485760} # 10 MiB per image
     pdf:
-      # PDF 解析默认使用 LiteParse，保留页码信息后进入原有切块/向量化链路
+      # 仅控制旧 ParseService / REINDEX；PROCESS_CONTENT 的 PDF 正文使用 PP
       engine: ${FILE_PARSING_PDF_ENGINE:liteparse}
     liteparse:
       command: ${FILE_PARSING_LITEPARSE_COMMAND:lit}
@@ -204,6 +208,8 @@ security:
 logging:
   level:
     org.springframework.web: ${LOG_LEVEL_WEB:DEBUG}
+    # This logger prints complete request URIs at DEBUG; keep other HTTP diagnostics configurable.
+    org.springframework.web.reactive.function.client.ExchangeFunctions: INFO
     org.springframework.boot.autoconfigure.web.servlet: ${LOG_LEVEL_AUTOCONFIG:DEBUG}
     org.springframework.security: ${LOG_LEVEL_SECURITY:DEBUG}
     com.yizhaoqi.smartpai: ${LOG_LEVEL_APP:DEBUG}
@@ -247,6 +253,19 @@ ai:
     temperature: ${AI_GENERATION_TEMPERATURE:0.3}
     max-tokens: ${AI_GENERATION_MAX_TOKENS:2000}
     top-p: ${AI_GENERATION_TOP_P:0.9}
+
+# PP-StructureV3 official async API (opt-in; no startup requests)
+paddle:
+  pp-structure:
+    enabled: ${PADDLEOCR_ENABLED:false}
+    base-url: ${PADDLEOCR_BASE_URL:https://paddleocr.aistudio-app.com}
+    access-token: ${PADDLEOCR_ACCESS_TOKEN:}
+    model: PP-StructureV3
+    request-timeout: 5m
+    poll-timeout: 10m
+    initial-poll-interval: 3s
+    max-poll-interval: 15s
+    result-max-bytes: 33554432 # 32 MiB, checked while receiving JSONL
 
 # 微信支付相关配置
 wx:

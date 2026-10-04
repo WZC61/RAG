@@ -3,12 +3,17 @@ package com.yizhaoqi.smartpai.consumer;
 import com.yizhaoqi.smartpai.model.*;
 import com.yizhaoqi.smartpai.repository.*;
 import com.yizhaoqi.smartpai.service.*;
+import com.yizhaoqi.smartpai.parsing.DocumentParsingService;
+import com.yizhaoqi.smartpai.parsing.persistence.LegacyPermissionContext;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 import java.nio.file.*;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.Optional;
 import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -17,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class FileProcessingConsumerTest {
     @TempDir Path directory;
     private final ParseService parse = mock(ParseService.class);
+    private final DocumentParsingService pdfParsing = mock(DocumentParsingService.class);
     private final VectorizationService vectors = mock(VectorizationService.class);
     private final DocumentService documents = mock(DocumentService.class);
     private final FileContentRepository contentRows = mock(FileContentRepository.class);
@@ -33,6 +39,7 @@ class FileProcessingConsumerTest {
         consumer = new FileProcessingConsumer(parse, vectors, documents);
         ReflectionTestUtils.setField(consumer, "contentProcessing", contents);
         ReflectionTestUtils.setField(consumer, "files", files);
+        ReflectionTestUtils.setField(consumer, "parsingService", pdfParsing);
         Path source = directory.resolve("source.txt");
         Files.writeString(source, "content");
         task = new FileProcessingTask("md5", source.toString(), "source.txt", null, null, false,
@@ -147,5 +154,156 @@ class FileProcessingConsumerTest {
         assertEquals(FileContent.ProcessingStatus.MERGED, content.getProcessingStatus());
         assertEquals("checkpoint DB unavailable", content.getProcessingError());
         verifyNoInteractions(vectors);
+    }
+
+    @Test
+    void pdfHeaderUsesNewPipelineEvenWithNonPdfFilenameAndDoesNotMarkParsedAgain() throws Exception {
+        usePdf("document.txt");
+        when(pdfParsing.parseAndPersist(eq("md5"), eq(1L), any(), any())).thenAnswer(invocation -> {
+            InputStream input = invocation.getArgument(2);
+            assertEquals("%PDF-", new String(input.readNBytes(5), java.nio.charset.StandardCharsets.US_ASCII));
+            assertEquals(new LegacyPermissionContext("1", "TEAM_A", true), invocation.getArgument(3));
+            content.setProcessingStatus(FileContent.ProcessingStatus.PARSED);
+            content.setProcessingError(null);
+            return true;
+        });
+        consumer.processTask(task);
+        verifyNoInteractions(parse);
+        verify(contents, never()).parsed(anyString(), anyLong());
+        var order = inOrder(pdfParsing, contents, vectors);
+        order.verify(contents).checkpoint("md5", 1);
+        order.verify(pdfParsing).parseAndPersist(eq("md5"), eq(1L), any(), any());
+        order.verify(contents).checkpoint("md5", 1);
+        order.verify(vectors).vectorizeWithUsage("md5", "1", "TEAM_A", true, "1");
+        order.verify(contents).indexed("md5", 1, usage);
+        assertEquals(FileContent.ProcessingStatus.INDEXED, content.getProcessingStatus());
+    }
+
+    @Test
+    void pdfSuffixWithoutPdfHeaderStillUsesLegacyNonPdfParser() throws Exception {
+        task.setFileName("document.pdf");
+        consumer.processTask(task);
+        verify(parse).parseAndSave(eq("md5"), any(), eq("1"), eq("TEAM_A"), eq(true));
+        verifyNoInteractions(pdfParsing);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PP submit failed", "PP poll failed", "JSONL decode failed", "Mapper failed",
+            "Assembler failed", "Chunk failed", "Figure download failed", "MinIO failed", "DB persistence failed"})
+    void pdfStageFailuresKeepMergedRecordErrorAndPropagateToRetry(String message) throws Exception {
+        usePdf("document.pdf");
+        doThrow(new IOException(message)).when(pdfParsing).parseAndPersist(anyString(), anyLong(), any(), any());
+        assertThrows(RuntimeException.class, () -> consumer.processTask(task));
+        assertEquals(FileContent.ProcessingStatus.MERGED, content.getProcessingStatus());
+        assertEquals(message, content.getProcessingError());
+        verify(contents, never()).parsed(anyString(), anyLong());
+        verify(contents, never()).failed(anyString(), anyLong(), any());
+        verifyNoInteractions(parse, vectors, documents);
+    }
+
+    @Test
+    void generationChangedDuringPdfParsingEndsOldTaskWithoutVectorizationOrRetry() throws Exception {
+        usePdf("document.pdf");
+        when(pdfParsing.parseAndPersist(anyString(), anyLong(), any(), any())).thenAnswer(invocation -> {
+            content.setProcessingGeneration(2);
+            content.setProcessingError("new generation error");
+            return false;
+        });
+        assertDoesNotThrow(() -> consumer.processTask(task));
+        assertEquals(2, content.getProcessingGeneration());
+        assertEquals(FileContent.ProcessingStatus.MERGED, content.getProcessingStatus());
+        assertEquals("new generation error", content.getProcessingError());
+        verifyNoInteractions(parse, vectors);
+        verify(contents, never()).recordError(anyString(), anyLong(), any());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = FileContent.ProcessingStatus.class, names = {"INDEXED", "FAILED"})
+    void terminalStateReachedDuringPdfParsingSkipsVectorization(FileContent.ProcessingStatus status) throws Exception {
+        usePdf("document.pdf");
+        when(pdfParsing.parseAndPersist(anyString(), anyLong(), any(), any())).thenAnswer(invocation -> {
+            content.setProcessingStatus(status);
+            return false;
+        });
+        consumer.processTask(task);
+        assertEquals(status, content.getProcessingStatus());
+        verifyNoInteractions(parse, vectors);
+        verify(contents, never()).parsed(anyString(), anyLong());
+    }
+
+    @Test
+    void anotherTaskCommittedParsedCanReuseItsDurableArtifacts() throws Exception {
+        usePdf("document.pdf");
+        when(pdfParsing.parseAndPersist(anyString(), anyLong(), any(), any())).thenAnswer(invocation -> {
+            content.setProcessingStatus(FileContent.ProcessingStatus.PARSED);
+            return false;
+        });
+        consumer.processTask(task);
+        assertEquals(FileContent.ProcessingStatus.INDEXED, content.getProcessingStatus());
+        verifyNoInteractions(parse);
+        verify(contents, never()).parsed(anyString(), anyLong());
+    }
+
+    @Test
+    void pdfResultWithoutParsedCheckpointCannotStartVectorization() throws Exception {
+        usePdf("document.pdf");
+        when(pdfParsing.parseAndPersist(anyString(), anyLong(), any(), any())).thenReturn(true);
+        assertThrows(RuntimeException.class, () -> consumer.processTask(task));
+        assertEquals(FileContent.ProcessingStatus.MERGED, content.getProcessingStatus());
+        assertTrue(content.getProcessingError().contains("did not reach PARSED"));
+        verifyNoInteractions(vectors);
+    }
+
+    @Test
+    void pdfVectorizationFailureRetriesFromParsedWithoutCallingPpAgain() throws Exception {
+        usePdf("document.pdf");
+        when(pdfParsing.parseAndPersist(anyString(), anyLong(), any(), any())).thenAnswer(invocation -> {
+            content.setProcessingStatus(FileContent.ProcessingStatus.PARSED);
+            return true;
+        });
+        when(vectors.vectorizeWithUsage("md5", "1", "TEAM_A", true, "1"))
+                .thenThrow(new IllegalStateException("vector failed")).thenReturn(usage);
+        assertThrows(RuntimeException.class, () -> consumer.processTask(task));
+        assertEquals(FileContent.ProcessingStatus.PARSED, content.getProcessingStatus());
+        assertEquals("vector failed", content.getProcessingError());
+        task.setFilePath(null); // PARSED retry must not download anything.
+        consumer.processTask(task);
+        verify(pdfParsing, times(1)).parseAndPersist(anyString(), anyLong(), any(), any());
+        verifyNoInteractions(parse);
+        assertEquals(FileContent.ProcessingStatus.INDEXED, content.getProcessingStatus());
+        assertNull(content.getProcessingError());
+    }
+
+    @Test
+    void alreadyParsedPdfDoesNotCallPpOrDownload() throws Exception {
+        usePdf("document.pdf");
+        content.setProcessingStatus(FileContent.ProcessingStatus.PARSED);
+        task.setFilePath(null);
+        consumer.processTask(task);
+        verifyNoInteractions(parse, pdfParsing);
+        assertEquals(FileContent.ProcessingStatus.INDEXED, content.getProcessingStatus());
+    }
+
+    @Test
+    void disabledPpRecordsClearConfigurationErrorAndDoesNotFallBack() throws Exception {
+        usePdf("document.pdf");
+        DocumentParsingService disabled = new DocumentParsingService(
+                new org.springframework.beans.factory.support.DefaultListableBeanFactory()
+                        .getBeanProvider(com.yizhaoqi.smartpai.parsing.pp.PpStructureApiClient.class),
+                new com.yizhaoqi.smartpai.parsing.chunk.ParsedDocumentChunker(
+                        new com.yizhaoqi.smartpai.parsing.chunk.TextChunker(512, 100, 100)),
+                mock(com.yizhaoqi.smartpai.parsing.persistence.DocumentParsingPersistenceCoordinator.class));
+        ReflectionTestUtils.setField(consumer, "parsingService", disabled);
+        assertThrows(RuntimeException.class, () -> consumer.processTask(task));
+        assertEquals(FileContent.ProcessingStatus.MERGED, content.getProcessingStatus());
+        assertTrue(content.getProcessingError().contains("PP-StructureV3 disabled"));
+        verifyNoInteractions(parse, vectors);
+    }
+
+    private void usePdf(String filename) throws Exception {
+        Path pdf = directory.resolve("actual-pdf.bin");
+        Files.writeString(pdf, "%PDF-1.7\nFake PDF for routing tests");
+        task.setFilePath(pdf.toString());
+        task.setFileName(filename);
     }
 }

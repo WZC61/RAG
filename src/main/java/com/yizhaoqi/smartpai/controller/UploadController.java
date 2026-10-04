@@ -9,6 +9,7 @@ import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.repository.FileContentRepository;
 import com.yizhaoqi.smartpai.service.FileTypeValidationService;
 import com.yizhaoqi.smartpai.service.ParseService;
+import com.yizhaoqi.smartpai.parsing.PdfSignature;
 import com.yizhaoqi.smartpai.service.UploadService;
 import com.yizhaoqi.smartpai.service.UserService;
 import com.yizhaoqi.smartpai.utils.LogUtils;
@@ -19,6 +20,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.BufferedInputStream;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -382,17 +384,22 @@ public class UploadController {
                     .orElseThrow(() -> new RuntimeException("文件记录不存在"));
 
             ParseService.EmbeddingEstimate embeddingEstimate = null;
-            try (io.minio.GetObjectResponse mergedFileStream = uploadService.getMergedFileStream(request.fileMd5())) {
-                embeddingEstimate = parseService.estimateEmbeddingUsage(mergedFileStream);
-                fileContentRepository.updateEstimates(request.fileMd5(), embeddingEstimate.estimatedTokens(), embeddingEstimate.estimatedChunkCount());
-                LogUtils.logBusiness(
-                        "MERGE_FILE",
-                        userId,
-                        "文档 Embedding 预估完成: fileMd5=%s, estimatedTokens=%d, estimatedChunkCount=%d",
-                        request.fileMd5(),
-                        embeddingEstimate.estimatedTokens(),
-                        embeddingEstimate.estimatedChunkCount()
-                );
+            try (BufferedInputStream mergedFileStream = new BufferedInputStream(uploadService.getMergedFileStream(request.fileMd5()))) {
+                if (PdfSignature.isPdf(mergedFileStream)) {
+                    LogUtils.logBusiness("MERGE_FILE", userId,
+                            "PDF 跳过同步解析预估，正文交由异步 PP 解析: fileMd5=%s", request.fileMd5());
+                } else {
+                    embeddingEstimate = parseService.estimateEmbeddingUsage(mergedFileStream);
+                    fileContentRepository.updateEstimates(request.fileMd5(), embeddingEstimate.estimatedTokens(), embeddingEstimate.estimatedChunkCount());
+                    LogUtils.logBusiness(
+                            "MERGE_FILE",
+                            userId,
+                            "文档 Embedding 预估完成: fileMd5=%s, estimatedTokens=%d, estimatedChunkCount=%d",
+                            request.fileMd5(),
+                            embeddingEstimate.estimatedTokens(),
+                            embeddingEstimate.estimatedChunkCount()
+                    );
+                }
             } catch (Exception estimateException) {
                 LogUtils.logBusinessError(
                         "MERGE_FILE",
