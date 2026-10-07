@@ -1,5 +1,6 @@
 package com.yizhaoqi.smartpai.config;
 
+import com.yizhaoqi.smartpai.service.OrgTagCacheService;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.utils.JwtUtils;
@@ -12,7 +13,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
-
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Optional;
@@ -47,6 +47,8 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
     
     @Autowired
     private FileUploadRepository fileUploadRepository;
+    @Autowired
+    private OrgTagCacheService orgTagCacheService;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
@@ -145,68 +147,19 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
                 return;
             }
             
-            String resourceOrgTag = resourceInfo.getOrgTag();
-            
-            // 如果是公开资源、资源没有组织标签、或属于默认组织，直接放行
-            if (resourceInfo.isPublic() || 
-                resourceOrgTag == null || 
-                resourceOrgTag.isEmpty() || 
-                DEFAULT_ORG_TAG.equals(resourceOrgTag)) {
-                logger.debug("资源是公开的或无组织标签或属于默认组织，放行请求");
-                filterChain.doFilter(request, response);
-                return;
-            }
-            
-            // 从请求头获取token
+            // Any completed relation may grant access; never choose one arbitrary uploader.
             String token = extractToken(request);
-            if (token == null) {
-                logger.debug("未找到Token，返回401");
-                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-                return;
-            }
-            
-            // 获取用户名和角色
-            String username = jwtUtils.extractUsernameFromToken(token);
-            String role = jwtUtils.extractRoleFromToken(token);
-            
-            // 如果是资源拥有者，直接放行
-            if (username != null && username.equals(resourceInfo.getOwner())) {
-                logger.debug("用户是资源拥有者，放行请求");
-                filterChain.doFilter(request, response);
-                return;
-            }
-            
-            // 如果是管理员，直接放行
-            if ("ADMIN".equals(role)) {
-                logger.debug("用户是管理员，放行请求");
-                filterChain.doFilter(request, response);
-                return;
-            }
-            
-            // 检查是否为私人组织标签资源
-            if (resourceOrgTag.startsWith(PRIVATE_TAG_PREFIX)) {
-                // 私人标签资源只允许拥有者访问，此处已排除拥有者和管理员，拒绝访问
-                logger.debug("私人资源，且用户不是拥有者或管理员，拒绝访问");
-                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-                return;
-            }
-            
-            // 获取用户的组织标签
-            String userOrgTags = jwtUtils.extractOrgTagsFromToken(token);
-            if (userOrgTags == null || userOrgTags.isEmpty()) {
-                logger.debug("用户没有组织标签，拒绝访问");
-                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-                return;
-            }
-            
-            // 检查用户是否有权限访问该资源
-            if (isUserAuthorized(userOrgTags, resourceOrgTag)) {
-                logger.debug("用户有访问权限，放行请求");
-                filterChain.doFilter(request, response);
-            } else {
-                logger.debug("用户组织标签不匹配资源组织，拒绝访问");
-                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-            }
+            String id = token == null ? null : jwtUtils.extractUserIdFromToken(token);
+            String username = token == null ? null : jwtUtils.extractUsernameFromToken(token);
+            java.util.List<String> tags = username == null ? java.util.List.of()
+                    : orgTagCacheService.getUserEffectiveOrgTags(username);
+            boolean allowed = fileUploadRepository.findAllByFileMd5(resourceId).stream()
+                    .filter(f -> f.getStatus() == FileUpload.STATUS_COMPLETED)
+                    .anyMatch(f -> f.isPublic() || (id != null && id.equals(f.getUserId()))
+                            || (f.getOrgTag() != null && !f.getOrgTag().startsWith(PRIVATE_TAG_PREFIX)
+                            && tags.contains(f.getOrgTag())));
+            if (allowed) filterChain.doFilter(request, response);
+            else response.setStatus(token == null ? HttpServletResponse.SC_UNAUTHORIZED : HttpServletResponse.SC_FORBIDDEN);
         } catch (Exception e) {
             logger.error("组织标签授权过滤器发生错误: {}", e.getMessage(), e);
             response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);

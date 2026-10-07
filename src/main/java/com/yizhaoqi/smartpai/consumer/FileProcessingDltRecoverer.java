@@ -1,5 +1,6 @@
 package com.yizhaoqi.smartpai.consumer;
 
+import com.yizhaoqi.smartpai.service.SharedContentAclService;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.service.FileContentProcessingService;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -9,10 +10,17 @@ import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 public class FileProcessingDltRecoverer implements ConsumerRecordRecoverer {
     private final ConsumerRecordRecoverer publisher;
     private final FileContentProcessingService contents;
+    private final SharedContentAclService acl;
 
     public FileProcessingDltRecoverer(ConsumerRecordRecoverer publisher, FileContentProcessingService contents) {
+        this(publisher, contents, null);
+    }
+
+    public FileProcessingDltRecoverer(ConsumerRecordRecoverer publisher, FileContentProcessingService contents,
+            SharedContentAclService acl) {
         this.publisher = publisher;
         this.contents = contents;
+        this.acl = acl;
     }
 
     @Override
@@ -22,6 +30,9 @@ public class FileProcessingDltRecoverer implements ConsumerRecordRecoverer {
         publisher.accept(record, exception);
         if (record.value() instanceof FileProcessingTask task && task.hasValidContentIdentity()) {
             contents.failed(task.getFileMd5(), task.getProcessingGeneration(), exception);
+        } else if (record.value() instanceof FileProcessingTask task && task.hasValidAclIdentity()) {
+            if (acl == null) throw new IllegalStateException("Missing ACL recovery service");
+            acl.retryAfterDlt(task);
         }
         // Unreadable/raw messages and invalid identities still reach DLT without a state update.
     }

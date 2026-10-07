@@ -1,5 +1,6 @@
 package com.yizhaoqi.smartpai.service;
 
+import com.yizhaoqi.smartpai.model.ContentAcl;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
@@ -12,7 +13,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-
 import java.util.List;
 
 // Elasticsearch操作封装服务
@@ -45,7 +45,8 @@ public class ElasticsearchService {
                     .toList();
 
             // 创建BulkRequest对象，并将批量操作列表添加到请求中
-            BulkRequest request = BulkRequest.of(b -> b.operations(bulkOperations));
+            BulkRequest request = BulkRequest.of(b -> b.operations(bulkOperations)
+                    .refresh(co.elastic.clients.elasticsearch._types.Refresh.WaitFor));
             
             // 执行批量索引操作
             BulkResponse response = esClient.bulk(request);
@@ -77,12 +78,29 @@ public class ElasticsearchService {
         try {
             DeleteByQueryRequest request = DeleteByQueryRequest.of(d -> d
                     .index("knowledge_base")
-                    .query(q -> q.term(t -> t.field("fileMd5").value(fileMd5)))
+                    .query(q -> q.term(t -> t.field("fileMd5").value(fileMd5))).refresh(true)
             );
-            esClient.deleteByQuery(request);
+            var result = esClient.deleteByQuery(request);
+            if (result.timedOut() || result.versionConflicts() > 0 || !result.failures().isEmpty())
+                throw new IllegalStateException("Shared index deletion did not finish completely");
         } catch (Exception e) {
             throw new RuntimeException("删除文档失败", e);
         }
+    }
+
+    /** One predicate updates TEXT and FIGURE, including historical documents without type fields. */
+    public void replaceAcl(String md5, ContentAcl acl) {
+        try {
+            var response = esClient.updateByQuery(r -> r.index("knowledge_base").refresh(true)
+                    .query(q -> q.term(t -> t.field("fileMd5").value(md5)))
+                    .script(s -> s.inline(i -> i.lang("painless")
+                            .source("ctx._source.allowedUserIds=params.users; ctx._source.allowedOrgTags=params.orgs; ctx._source.public=params.published; ctx._source.remove('isPublic');")
+                            .params("users", co.elastic.clients.json.JsonData.of(acl.allowedUserIds()))
+                            .params("orgs", co.elastic.clients.json.JsonData.of(acl.allowedOrgTags()))
+                            .params("published", co.elastic.clients.json.JsonData.of(acl.isPublic())))));
+            if (response.timedOut() || response.versionConflicts() > 0 || !response.failures().isEmpty())
+                throw new IllegalStateException("ACL replacement did not finish completely");
+        } catch (Exception failure) { throw new IllegalStateException("Cannot replace shared content ACL", failure); }
     }
 
     public long countByFileMd5(String fileMd5) {

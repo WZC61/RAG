@@ -14,6 +14,13 @@ public class FileProcessingTask {
     public static final String TASK_TYPE_UPLOAD_PROCESS = "UPLOAD_PROCESS";
     public static final String TASK_TYPE_PROCESS_CONTENT = "PROCESS_CONTENT";
     public static final String TASK_TYPE_REINDEX = "REINDEX";
+    public static final String TASK_TYPE_ACL_CHANGED = "ACL_CHANGED";
+
+    public boolean hasValidAclIdentity() {
+        return TASK_TYPE_ACL_CHANGED.equals(taskType) && fileMd5 != null && !fileMd5.isBlank()
+                && eventId != null && eventId.startsWith(TASK_TYPE_ACL_CHANGED + ":")
+                && eventId.length() > TASK_TYPE_ACL_CHANGED.length() + 1;
+    }
 
     private String fileMd5; // 文件的 MD5 校验值
     private String filePath; // 文件存储路径

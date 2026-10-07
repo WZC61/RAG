@@ -1,5 +1,8 @@
 package com.yizhaoqi.smartpai.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yizhaoqi.smartpai.model.AclChangedPayload;
+import com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository;
 import com.yizhaoqi.smartpai.model.FileContent;
 import com.yizhaoqi.smartpai.repository.FileContentRepository;
 import org.springframework.stereotype.Service;
@@ -11,7 +14,11 @@ import java.time.LocalDateTime;
 @Service
 public class FileContentProcessingService {
     private final FileContentRepository contents;
-    public FileContentProcessingService(FileContentRepository contents) { this.contents = contents; }
+    private final ProcessingOutboxRepository outbox;
+    public FileContentProcessingService(FileContentRepository contents,
+            ProcessingOutboxRepository outbox) {
+        this.contents = contents; this.outbox = outbox;
+    }
 
     public boolean needsProcessing(String md5, long generation) {
         FileContent.ProcessingStatus status = checkpoint(md5, generation);
@@ -36,11 +43,18 @@ public class FileContentProcessingService {
     public void indexed(String md5, long generation, VectorizationService.VectorizationUsageResult usage) {
         FileContent content = current(md5, generation);
         if (content == null) return;
+        if (content.getProcessingStatus() != FileContent.ProcessingStatus.PARSED
+                || usage == null || usage.actualChunkCount() <= 0)
+            throw new IllegalStateException("INDEXED requires PARSED and a non-empty successful index result");
         content.setProcessingStatus(FileContent.ProcessingStatus.INDEXED);
         content.setProcessingError(null);
         content.setActualEmbeddingTokens((long) usage.actualEmbeddingTokens());
         content.setActualChunkCount(usage.actualChunkCount());
         content.setIndexedAt(LocalDateTime.now());
+        // Repairs relation changes that occurred while models were running, even if an
+        // earlier ACL event found no ES documents. Commit with INDEXED, then dispatch.
+        outbox.saveAndFlush(AclChangedPayload.event(
+                new ObjectMapper(), md5, null));
     }
 
     @Transactional(transactionManager = "transactionManager")

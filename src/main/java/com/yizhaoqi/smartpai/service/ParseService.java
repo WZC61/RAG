@@ -93,6 +93,45 @@ public class ParseService {
 
     @Value("${file.parsing.liteparse.timeout-seconds:300}")
     private long liteParseTimeoutSeconds;
+
+    /** Modern non-PDF extraction only. No repositories or processing checkpoints are touched. */
+    public List<com.yizhaoqi.smartpai.parsing.chunk.TextChunk> parseToChunks(InputStream input)
+            throws IOException, TikaException {
+        checkMemoryThreshold();
+        CollectingContentHandler handler = new CollectingContentHandler();
+        try (BufferedInputStream buffered = new BufferedInputStream(input, bufferSize)) {
+            new AutoDetectParser().parse(buffered, handler, new Metadata(), new ParseContext());
+            return List.copyOf(handler.chunks);
+        } catch (SAXException failure) {
+            throw new IOException("Non-PDF document extraction failed", failure);
+        }
+    }
+
+    /** Keeps the legacy parent-batch boundaries and document-level numbering, in memory. */
+    private class CollectingContentHandler extends BodyContentHandler {
+        private final StringBuilder buffer = new StringBuilder();
+        private final List<com.yizhaoqi.smartpai.parsing.chunk.TextChunk> chunks = new ArrayList<>();
+
+        CollectingContentHandler() { super(-1); }
+
+        @Override public void characters(char[] chars, int start, int length) {
+            buffer.append(chars, start, length);
+            if (buffer.length() >= parentChunkSize) collect();
+        }
+
+        @Override public void endDocument() {
+            if (!buffer.isEmpty()) collect();
+        }
+
+        private void collect() {
+            for (TextChunkFragment fragment : textChunker.chunk(buffer.toString())) {
+                // Tika does not provide trustworthy page metadata; do not fabricate page 1.
+                chunks.add(new com.yizhaoqi.smartpai.parsing.chunk.TextChunk(
+                        null, chunks.size() + 1, fragment.text(), fragment.anchorText()));
+            }
+            buffer.setLength(0);
+        }
+    }
     
     /**
      * 以流式方式解析文件，将内容分块并保存到数据库，以避免OOM。

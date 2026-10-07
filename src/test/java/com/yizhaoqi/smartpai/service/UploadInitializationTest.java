@@ -80,6 +80,7 @@ class UploadInitializationTest {
 
         service = new UploadService();
         ReflectionTestUtils.setField(service, "fileUploadRepository", repository);
+        ReflectionTestUtils.setField(service, "fileContentRepository", contents);
         ReflectionTestUtils.setField(service, "minioClient", minio);
         ReflectionTestUtils.setField(service, "chunkInfoRepository", chunks);
         ReflectionTestUtils.setField(service, "uploadCompletionService", completion);
@@ -114,7 +115,7 @@ class UploadInitializationTest {
         assertEquals("1", result.getUserId());
         assertNull(result.getVectorizationStatus());
         assertEquals(FileContent.ProcessingStatus.MERGED, contents.findByFileMd5("md5").orElseThrow().getProcessingStatus());
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(FileUpload.STATUS_COMPLETED,
                 repository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc("md5", "1").orElseThrow().getStatus());
         verifyNoInteractions(chunks);
@@ -139,7 +140,7 @@ class UploadInitializationTest {
         assertEquals("TEAM_B", second.getOrgTag());
         assertTrue(second.isPublic());
         assertEquals(1, contents.count());
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
     }
 
     @Test
@@ -227,7 +228,7 @@ class UploadInitializationTest {
         assertEquals(FileUpload.STATUS_COMPLETED, second.getStatus());
         assertEquals(2, repository.count());
         assertEquals(1, contents.count());
-        assertEquals(0, outbox.count());
+        assertEquals(0, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         verifyNoInteractions(chunks);
     }
 

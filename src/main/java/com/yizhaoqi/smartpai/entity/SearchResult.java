@@ -1,6 +1,8 @@
 package com.yizhaoqi.smartpai.entity;
 
 import lombok.Data;
+import java.util.List;
+import java.util.Set;
 
 @Data
 public class SearchResult {
@@ -16,6 +18,39 @@ public class SearchResult {
     private String anchorText; // 页内定位锚点
     private String retrievalMode; // 召回方式
     private String matchedChunkText; // 命中的 chunk 原文
+    // Additive compatibility fields; consumers can keep using the original text fields.
+    private String entryId;
+    private EsDocument.DocumentType documentType;
+    private Long processingGeneration;
+    private Integer figureIndex;
+    private String figureLabel;
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private String imagePath;
+    private List<Double> bbox;
+    private String caption;
+    private String description;
+    private String ocrText;
+    private Integer vectorRank;
+    private Integer bm25Rank;
+    private Set<RetrievalResult.Channel> matchedChannels;
+    private Double rrfScore;
+    private boolean degraded;
+    private Set<RetrievalResult.Channel> failedChannels;
+
+    public static SearchResult fromRetrieval(RetrievalResult r, RetrievalResponse response) {
+        SearchResult result = new SearchResult(r.getFileMd5(), r.getChunkId(), r.getTextContent(), r.getRrfScore(),
+                null, null, r.isPublic(), r.getFileName(), r.getPageNumber(), r.getAnchorText(),
+                response.getRetrievalMode(), r.getTextContent());
+        result.setEntryId(r.getEntryId()); result.setDocumentType(r.getDocumentType());
+        result.setProcessingGeneration(r.getProcessingGeneration());
+        result.setFigureIndex(r.getFigureIndex()); result.setFigureLabel(r.getFigureLabel());
+        result.setImagePath(r.getImagePath()); result.setBbox(r.getBbox()); result.setCaption(r.getCaption());
+        result.setDescription(r.getDescription()); result.setOcrText(r.getOcrText());
+        result.setVectorRank(r.getVectorRank()); result.setBm25Rank(r.getBm25Rank());
+        result.setMatchedChannels(r.getMatchedChannels()); result.setRrfScore(r.getRrfScore());
+        result.setDegraded(response.isDegraded()); result.setFailedChannels(response.failedChannels());
+        return result;
+    }
 
     public SearchResult(String fileMd5, Integer chunkId, String textContent, Double score) {
         this(fileMd5, chunkId, textContent, score, null, null, false, null, null, null, null, null);

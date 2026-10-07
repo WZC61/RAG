@@ -26,7 +26,7 @@ import static org.mockito.Mockito.*;
 class FileProcessingDltRecovererTest {
     private KafkaTemplate<String, Object> kafka;
     private final FileContentRepository rows = mock(FileContentRepository.class);
-    private final FileContentProcessingService contents = spy(new FileContentProcessingService(rows));
+    private final FileContentProcessingService contents = spy(new FileContentProcessingService(rows, org.mockito.Mockito.mock(com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository.class)));
     private FileContent content;
     private FileProcessingTask task;
     private ConsumerRecord<String, Object> record;
@@ -59,7 +59,7 @@ class FileProcessingDltRecovererTest {
         record = new ConsumerRecord<>("file-processing-topic1", 2, 7, "md5", task);
         KafkaConfig config = new KafkaConfig();
         ReflectionTestUtils.setField(config, "fileProcessingDltTopic", "file-processing-dlt");
-        recoverer = config.fileProcessingRecoverer(kafka, contents);
+        recoverer = config.fileProcessingRecoverer(kafka, contents, mock(com.yizhaoqi.smartpai.service.SharedContentAclService.class));
     }
 
     @Test

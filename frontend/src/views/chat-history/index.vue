@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { NScrollbar } from 'naive-ui';
-import { VueMarkdownItProvider } from '@/vendor/vue-markdown-shiki';
+import { VueMarkdownItProvider, safeMarkdownOptions } from '@/vendor/vue-markdown-shiki';
 import ChatMessage from '../chat/modules/chat-message.vue';
 
 defineOptions({
@@ -88,7 +88,7 @@ async function getList() {
     </Teleport>
     <NScrollbar ref="scrollbarRef">
       <NSpin :show="loading" class="h-full">
-        <VueMarkdownItProvider>
+        <VueMarkdownItProvider :options="safeMarkdownOptions">
           <ChatMessage v-for="(item, index) in list" :key="index" :msg="item" />
         </VueMarkdownItProvider>
         <NEmpty v-if="!list.length" description="暂无数据" class="mt-60" />

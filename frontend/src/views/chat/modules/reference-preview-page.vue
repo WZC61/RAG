@@ -3,7 +3,9 @@ import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { NEmpty, NSpin } from 'naive-ui';
 import { request } from '@/service/request';
+import { sanitizeReferenceMappings } from '@/utils/references';
 import FilePreview from '@/components/custom/file-preview.vue';
+import FigureReference from '@/components/custom/figure-reference.vue';
 
 defineOptions({ name: 'ReferencePreviewPage' });
 
@@ -12,6 +14,7 @@ const router = useRouter();
 
 const loading = ref(false);
 const loadError = ref('');
+const figureReference = ref<Api.Chat.ReferenceEvidence | null>(null);
 const fileName = ref('');
 const fileMd5 = ref('');
 const pageNumber = ref<number | undefined>(undefined);
@@ -59,6 +62,8 @@ function syncFromStorage() {
       referenceNumber?: number | null;
     };
 
+    const clean = sanitizeReferenceMappings({ 1: payload })['1'];
+    figureReference.value = clean?.documentType === 'FIGURE' ? clean : null;
     fileName.value = payload.fileName || fileName.value;
     fileMd5.value = payload.fileMd5 || fileMd5.value;
     pageNumber.value = payload.pageNumber || pageNumber.value;
@@ -107,6 +112,8 @@ async function loadReferenceDetail() {
       return;
     }
 
+    const clean = sanitizeReferenceMappings({ 1: data })['1'];
+    figureReference.value = clean?.documentType === 'FIGURE' ? clean : null;
     fileName.value = data.fileName || fileName.value;
     fileMd5.value = data.fileMd5 || fileMd5.value;
     pageNumber.value = data.pageNumber || pageNumber.value;
@@ -125,6 +132,8 @@ async function loadReferenceDetail() {
   }
 }
 
+function focusPdf() { document.getElementById('reference-pdf')?.scrollIntoView({ behavior: 'smooth' }); }
+
 function handleBack() {
   if (window.history.length > 1) {
     router.back();
@@ -137,7 +146,7 @@ function handleBack() {
 watch(
   () => route.query,
   () => {
-    void loadReferenceDetail();
+    loadReferenceDetail();
   },
   { immediate: true }
 );
@@ -158,6 +167,9 @@ watch(
       <div v-if="loadError && !previewKey" class="preview-page-tip">
         {{ loadError }}
       </div>
+      <FigureReference v-if="figureReference" :reference="figureReference" :reference-number="referenceNumber"
+        @open-pdf="focusPdf" />
+      <div id="reference-pdf" />
       <FilePreview
         :file-name="fileName"
         :file-md5="fileMd5 || undefined"

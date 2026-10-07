@@ -1,7 +1,10 @@
 # Parsed artifact persistence
 
 FileProcessingConsumer now routes MERGED PROCESS_CONTENT PDFs through DocumentParsingService,
-which calls this coordinator. Non-PDF content and legacy ParseService compatibility remain unchanged.
+which calls this coordinator. Modern non-PDF PROCESS_CONTENT uses
+NonPdfDocumentParsingService: ParseService.parseToChunks performs complete Tika extraction
+and existing semantic chunking without repository writes, then calls the same atomic persistence
+service. The legacy ParseService.parseAndSave compatibility entry point remains unchanged.
 
 Call `DocumentParsingPersistenceCoordinator.persist(fileMd5, generation, artifacts, chunks, permissions)`
 through its Spring proxy, after PP, mapping, assembly and chunking have finished. `true` means a
@@ -19,6 +22,15 @@ JPA transaction manager. It locks FileContent, rechecks generation and MERGED st
 document_vectors and document_figures for this fileMd5, and changes the same content to PARSED,
 clearing processingError. Save/flush/commit failures roll back deletions, inserts and the checkpoint.
 PARSED/INDEXED are never replaced, FAILED remains terminal, and no processing lease/state is added.
+
+NonPdfDocumentParsingService also uses NOT_SUPPORTED while extracting. It returns a complete
+in-memory TextChunk list before any artifact-row writes. Tika pages are unknown (null), indices
+remain document-level 1-based, and Figures are empty; PDF coordinator still requires positive
+page numbers. Tika/extraction failures leave existing rows and MERGED untouched. DB failures
+roll back the entire replacement/checkpoint. Same-generation PARSED retries skip replacement;
+slow obsolete generations return false at the locked commit boundary. Buffer/parent batch sizes
+and TextChunker settings reuse the existing ParseService configuration; large documents retain
+their complete chunk list in memory for this atomic commit.
 
 MinIO and MySQL are not atomic. A later figure failure or failed database commit can leave images in
 MinIO. Retry for the same generation uses the same content-type-derived keys; a new generation gets

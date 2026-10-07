@@ -1,4 +1,5 @@
 package com.yizhaoqi.smartpai.service;
+import com.yizhaoqi.smartpai.model.FileProcessingTask;
 
 import com.yizhaoqi.smartpai.controller.UploadController;
 import com.yizhaoqi.smartpai.model.ChunkInfo;
@@ -391,7 +392,7 @@ class MergeConcurrencyTest {
         assertFalse(objects.containsKey(path(userId)));
         assertTrue(outbox.findByEventId(UploadCompletionService.initialEventId("md5", 1)).isPresent());
         assertEquals(1, contents.count());
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
     }
 
     private void assertRetryable(String userId) {

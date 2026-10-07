@@ -1,5 +1,6 @@
 package com.yizhaoqi.smartpai.service;
 
+import com.yizhaoqi.smartpai.repository.FileContentRepository;
 import com.yizhaoqi.smartpai.config.MinioConfig;
 import com.yizhaoqi.smartpai.exception.CustomException;
 import com.yizhaoqi.smartpai.model.ChunkInfo;
@@ -23,7 +24,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.io.ByteArrayInputStream;
@@ -60,6 +60,9 @@ public class UploadService {
     @Autowired
     private FileUploadRepository fileUploadRepository;
 
+    @Autowired
+    private FileContentRepository fileContentRepository;
+
     // 用于操作分片信息的 Repository
     @Autowired
     private ChunkInfoRepository chunkInfoRepository;
@@ -72,6 +75,9 @@ public class UploadService {
                                        String orgTag, boolean isPublic, String userId) {
         boolean mergedExists = mergedObjectExists(fileMd5, totalSize);
         FileUpload fileUpload = getOrCreateFileUpload(fileMd5, totalSize, fileName, orgTag, isPublic, userId, getFileType(fileName));
+        // A newly registered reference protects storage. Recheck after waiting for a
+        // concurrent cleanup so init never trusts an object observed before that lock.
+        if (mergedExists) mergedExists = mergedObjectExists(fileMd5, totalSize);
         if (fileUpload.getStatus() == FileUpload.STATUS_MERGING) {
             throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
         }
@@ -507,33 +513,39 @@ public class UploadService {
         Object createLock = FILE_UPLOAD_CREATE_LOCKS.computeIfAbsent(lockKey, ignored -> new Object());
         synchronized (createLock) {
             try {
-                existingFileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId);
-                if (existingFileUpload.isPresent()) {
-                    return existingFileUpload.get();
-                }
+                TransactionTemplate creation = new TransactionTemplate(transactionManager);
+                creation.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+                return creation.execute(tx -> {
+                    fileContentRepository.findForUpdate(fileMd5);
+                    Optional<FileUpload> lockedReference = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId);
+                    if (lockedReference.isPresent()) {
+                        return lockedReference.get();
+                    }
 
-                logger.info("创建新的文件记录 => fileMd5: {}, fileName: {}, fileType: {}, totalSize: {}, userId: {}, orgTag: {}, isPublic: {}",
-                        fileMd5, fileName, fileType, totalSize, userId, orgTag, isPublic);
+                    logger.info("创建新的文件记录 => fileMd5: {}, fileName: {}, fileType: {}, totalSize: {}, userId: {}, orgTag: {}, isPublic: {}",
+                            fileMd5, fileName, fileType, totalSize, userId, orgTag, isPublic);
 
-                FileUpload fileUpload = new FileUpload();
-                fileUpload.setFileMd5(fileMd5);
-                fileUpload.setFileName(fileName);
-                fileUpload.setTotalSize(totalSize);
-                fileUpload.setStatus(FileUpload.STATUS_UPLOADING);
-                fileUpload.setUserId(userId);
-                fileUpload.setOrgTag(orgTag);
-                fileUpload.setPublic(isPublic);
+                    FileUpload fileUpload = new FileUpload();
+                    fileUpload.setFileMd5(fileMd5);
+                    fileUpload.setFileName(fileName);
+                    fileUpload.setTotalSize(totalSize);
+                    fileUpload.setStatus(FileUpload.STATUS_UPLOADING);
+                    fileUpload.setUserId(userId);
+                    fileUpload.setOrgTag(orgTag);
+                    fileUpload.setPublic(isPublic);
 
-                try {
-                    return fileUploadRepository.save(fileUpload);
-                } catch (DataIntegrityViolationException e) {
-                    logger.info("文件记录已存在，按幂等成功处理 => fileMd5: {}, userId: {}", fileMd5, userId);
-                    return fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
-                            .orElseThrow(() -> new RuntimeException("文件记录并发创建后查询失败", e));
-                } catch (Exception e) {
-                    logger.error("创建文件记录失败 => fileMd5: {}, fileName: {}, fileType: {}, 错误: {}", fileMd5, fileName, fileType, e.getMessage(), e);
-                    throw new RuntimeException("创建文件记录失败: " + e.getMessage(), e);
-                }
+                    try {
+                        return fileUploadRepository.save(fileUpload);
+                    } catch (DataIntegrityViolationException e) {
+                        throw e;
+                    } catch (Exception e) {
+                        logger.error("创建文件记录失败 => fileMd5: {}, fileName: {}, fileType: {}, 错误: {}", fileMd5, fileName, fileType, e.getMessage(), e);
+                        throw new RuntimeException("创建文件记录失败: " + e.getMessage(), e);
+                    }
+                });
+            } catch (DataIntegrityViolationException duplicate) {
+                return fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
+                        .orElseThrow(() -> duplicate);
             } finally {
                 FILE_UPLOAD_CREATE_LOCKS.remove(lockKey, createLock);
             }

@@ -4,7 +4,9 @@ import { nextTick } from 'vue';
 import { router } from '@/router';
 import { request } from '@/service/request';
 import { formatDate } from '@/utils/common';
+import { citedReferenceNumbers, escapeModelHtml } from '@/utils/references';
 import { VueMarkdownIt } from '@/vendor/vue-markdown-shiki';
+import FigureReference from '@/components/custom/figure-reference.vue';
 defineOptions({ name: 'ChatMessage' });
 
 const props = defineProps<{
@@ -82,6 +84,18 @@ const toolStatusLabels: Record<Api.Chat.AgentToolEvent['status'], string> = {
   failed: '失败'
 };
 
+const citedSources = computed(() => citedReferenceNumbers(props.msg.content || '')
+  .flatMap(number => {
+    const reference = props.msg.referenceMappings?.[String(number)];
+    return reference ? [{ number, reference }] : [];
+  }));
+const isDegraded = computed(() => props.msg.retrievalStatus === 'DEGRADED'
+  || Object.values(props.msg.referenceMappings || {}).some(source => source.degraded));
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+}
+
 const toolEvents = computed(() => props.msg.toolEvents || []);
 
 function getToolLabel(tool: string) {
@@ -158,7 +172,7 @@ function createSourceLink(
     pageNumber: extras?.pageNumber
   });
 
-  return `来源#${sourceNum}: <span class="${linkClass}" data-file-id="${fileId}">${extras?.displayName || trimmedFileName}</span>`;
+  return `来源#${sourceNum}: <span class="${linkClass}" data-file-id="${fileId}">${escapeHtml(extras?.displayName || trimmedFileName)}</span>`;
 }
 
 // 处理来源文件链接的函数
@@ -199,6 +213,14 @@ function processSourceLinks(text: string): string {
     return createSourceLink(sourceNum, fileName);
   });
 
+  // Native [N] citations work even if the online model omits the legacy source label.
+  processedText = processedText.replace(/\[(\d+)\](?!\()/g, (match, number: string) => {
+    const detail = props.msg.referenceMappings?.[number];
+    if (!detail) return match;
+    return createSourceLink(number, detail.fileName || '来源', {
+      fileMd5: detail.fileMd5, pageNumber: detail.pageNumber ?? undefined, displayName: `[${number}]`
+    }).replace(/^来源#\d+:\s*/, '');
+  });
   return processedText;
 }
 
@@ -208,7 +230,7 @@ const content = computed(() => {
 
   // 只对助手消息处理来源链接
   if (props.msg.role === 'assistant') {
-    return normalizeBareUrls(processSourceLinks(rawContent));
+    return normalizeBareUrls(processSourceLinks(escapeModelHtml(rawContent)));
   }
 
   return rawContent;
@@ -228,6 +250,14 @@ function extractContextAnchorText(target: HTMLElement) {
 }
 
 function openReferencePreviewPage(payload: {
+  documentType?: Api.Chat.ReferenceEvidence['documentType'];
+  entryId?: string | null;
+  processingGeneration?: number | null;
+  figureIndex?: number | null;
+  figureLabel?: string | null;
+  caption?: string | null;
+  description?: string | null;
+  ocrText?: string | null;
   retrievalMode?: Api.Chat.ReferenceEvidence['retrievalMode'];
   retrievalLabel?: string | null;
   retrievalQuery?: string | null;
@@ -314,6 +344,14 @@ async function handleSourceFileClick(fileInfo: {
 
     if (persistedDetail?.fileMd5 && !detail) {
       openReferencePreviewPage({
+        documentType: persistedDetail.documentType,
+        entryId: persistedDetail.entryId,
+        processingGeneration: persistedDetail.processingGeneration,
+        figureIndex: persistedDetail.figureIndex,
+        figureLabel: persistedDetail.figureLabel,
+        caption: persistedDetail.caption,
+        description: persistedDetail.description,
+        ocrText: persistedDetail.ocrText,
         fileName: persistedDetail.fileName || fileName,
         fileMd5: persistedDetail.fileMd5,
         pageNumber: persistedDetail.pageNumber,
@@ -333,6 +371,14 @@ async function handleSourceFileClick(fileInfo: {
 
     const targetMd5 = detail?.fileMd5 || extractedMd5 || null;
     openReferencePreviewPage({
+      documentType: detail?.documentType,
+      entryId: detail?.entryId,
+      processingGeneration: detail?.processingGeneration,
+      figureIndex: detail?.figureIndex,
+      figureLabel: detail?.figureLabel,
+      caption: detail?.caption,
+      description: detail?.description,
+      ocrText: detail?.ocrText,
       fileName: detail?.fileName || fileName,
       fileMd5: targetMd5,
       pageNumber: detail?.pageNumber,
@@ -398,6 +444,21 @@ async function handleSourceFileClick(fileInfo: {
       <VueMarkdownIt :content="content" />
     </div>
     <NText v-else-if="msg.role === 'user'" class="ml-12 mt-2 text-4">{{ content }}</NText>
+    <div v-if="msg.role === 'assistant' && isDegraded" class="ml-12 text-sm text-amber-600">检索部分通道不可用，证据可能不完整。</div>
+    <div v-if="msg.role === 'assistant' && citedSources.length" class="ml-12 mt-3 flex flex-col gap-3" aria-label="回答来源">
+      <div class="text-sm font-bold">回答来源</div>
+      <template v-for="source in citedSources" :key="source.number">
+        <FigureReference v-if="source.reference.documentType === 'FIGURE'"
+          :reference="source.reference" :reference-number="source.number"
+          @open-pdf="handleSourceFileClick({ fileName: source.reference.fileName, referenceNumber: source.number, fileMd5: source.reference.fileMd5 })" />
+        <div v-else class="rounded-8px border border-solid border-gray-200 p-3 text-sm">
+          <NButton text type="primary" @click="handleSourceFileClick({ fileName: source.reference.fileName, referenceNumber: source.number, fileMd5: source.reference.fileMd5 })">
+            [{{ source.number }}] {{ source.reference.fileName }}<span v-if="source.reference.pageNumber"> · 第{{ source.reference.pageNumber }}页</span>
+          </NButton>
+          <p v-if="source.reference.evidenceSnippet" class="mt-1 text-gray-500">{{ source.reference.evidenceSnippet }}</p>
+        </div>
+      </template>
+    </div>
     <NDivider class="ml-12 w-[calc(100%-3rem)] mb-0! mt-2!" />
     <div class="ml-12 flex gap-2">
       <NButton quaternary title="复制回答" aria-label="复制回答" @click="handleCopy(msg.content)">

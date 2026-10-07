@@ -6,6 +6,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.yizhaoqi.smartpai.model.*;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.service.*;
+import com.yizhaoqi.smartpai.parsing.description.FigureDescriptionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -115,16 +116,22 @@ class FileProcessingConsumerDownloadTest {
     @ValueSource(booleans = {false, true})
     void consumerLogsOnlyIdentitiesAndFrameworkExceptionHasNoPresignedUrl(boolean fails) throws Exception {
         FileContentProcessingService contents = mock(FileContentProcessingService.class);
-        when(contents.checkpoint("md5", 1)).thenReturn(FileContent.ProcessingStatus.MERGED);
+        when(contents.checkpoint("md5", 1)).thenReturn(FileContent.ProcessingStatus.MERGED, FileContent.ProcessingStatus.PARSED);
+        FigureDescriptionService descriptions = mock(FigureDescriptionService.class);
+        when(descriptions.describe("md5", 1)).thenReturn(true);
+        ReflectionTestUtils.setField(consumer, "figureDescriptions", descriptions);
         FileUploadRepository files = mock(FileUploadRepository.class);
         FileUpload access = new FileUpload(); access.setUserId("1"); access.setOrgTag("TEAM");
         when(files.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc("md5", "1")).thenReturn(Optional.of(access));
         ReflectionTestUtils.setField(consumer, "contentProcessing", contents);
         ReflectionTestUtils.setField(consumer, "files", files);
-        when(vectors.vectorizeWithUsage("md5", "1", "TEAM", false, "1"))
+        when(vectors.vectorizeWithUsage("md5", 1L, "1", "TEAM", false, "1"))
                 .thenReturn(new VectorizationService.VectorizationUsageResult(1, 1, "model"));
+        var nonPdf = mock(com.yizhaoqi.smartpai.parsing.NonPdfDocumentParsingService.class);
+        ReflectionTestUtils.setField(consumer, "nonPdfParsingService", nonPdf);
+        when(nonPdf.parseAndPersist(anyString(), anyLong(), any(), any())).thenReturn(true);
         if (fails) doThrow(new IOException("Resource " + BOS, new IOException("Original " + URL)))
-                .when(parse).parseAndSave(anyString(), any(), anyString(), anyString(), anyBoolean());
+                .when(nonPdf).parseAndPersist(anyString(), anyLong(), any(), any());
         FileProcessingTask task = new FileProcessingTask("md5", URL, "file.txt", null, null, false,
                 FileProcessingTask.TASK_TYPE_PROCESS_CONTENT, "1");
         task.setObjectPath("merged/md5"); task.setProcessingGeneration(1L); task.setEventId("PROCESS_CONTENT:md5:1");
@@ -132,7 +139,10 @@ class FileProcessingConsumerDownloadTest {
         ListAppender<ILoggingEvent> capture = new ListAppender<>(); capture.start(); logger.addAppender(capture);
         try {
             if (fails) assertRedacted(stack(assertThrows(RuntimeException.class, () -> consumer.processTask(task))));
-            else consumer.processTask(task);
+            else {
+                consumer.processTask(task);
+                verify(contents).indexed(eq("md5"), eq(1L), any());
+            }
             StringBuilder messages = new StringBuilder();
             for (ILoggingEvent event : capture.list) {
                 messages.append(event.getFormattedMessage());

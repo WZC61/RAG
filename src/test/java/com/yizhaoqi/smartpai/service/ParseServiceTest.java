@@ -42,6 +42,34 @@ class ParseServiceTest {
     }
 
     @Test
+    void modernTikaExtractionReturnsCompleteChunksWithoutWritingTheRepository() throws Exception {
+        String text = "First paragraph.\n\nSecond paragraph.";
+        var extracted = parseService.parseToChunks(stream(text));
+        assertEquals(textChunker.chunk(text).stream().map(TextChunkFragment::text).toList(),
+                extracted.stream().map(com.yizhaoqi.smartpai.parsing.chunk.TextChunk::text).toList());
+        for (int i = 0; i < extracted.size(); i++) {
+            assertEquals(i + 1, extracted.get(i).chunkIndex());
+            assertNull(extracted.get(i).pageNumber());
+            assertFalse(extracted.get(i).anchorText().isBlank());
+        }
+        verifyNoInteractions(repository);
+    }
+
+    @Test
+    void modernCollectorKeepsPartialBatchesOnlyInMemory() throws Exception {
+        ReflectionTestUtils.setField(parseService, "parentChunkSize", 8);
+        Class<?> type = Class.forName(ParseService.class.getName() + "$CollectingContentHandler");
+        var ctor = type.getDeclaredConstructor(ParseService.class); ctor.setAccessible(true);
+        BodyContentHandler handler = (BodyContentHandler) ctor.newInstance(parseService);
+        for (String part : List.of("First paragraph. Second sentence.", "Another paragraph. Final sentence."))
+            handler.characters(part.toCharArray(), 0, part.length());
+        handler.endDocument();
+        var chunks = (List<?>) ReflectionTestUtils.getField(handler, "chunks");
+        assertTrue(chunks.size() > 1);
+        verifyNoInteractions(repository);
+    }
+
+    @Test
     void tikaStillSavesTextAnchorsMetadataAndGlobalChunkIds() throws Exception {
         String text = "First paragraph.\n\nSecond paragraph.";
         List<TextChunkFragment> expected = textChunker.chunk(text);

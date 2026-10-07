@@ -8,7 +8,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -87,7 +86,7 @@ public class FigureImageStorageService {
                 bytes = output.toByteArray();
             }
             if (bytes.length == 0) throw new IOException("Figure image response is empty");
-            String contentType = imageContentType(bytes);
+            String contentType = FigureImageFormat.detect(bytes);
             String path = prefix + extension(contentType);
             try (InputStream input = new ByteArrayInputStream(bytes)) {
                 minio.putObject(PutObjectArgs.builder().bucket(bucket).object(path)
@@ -119,23 +118,6 @@ public class FigureImageStorageService {
         String type = header == null ? "" : header.split(";", 2)[0].trim().toLowerCase(Locale.ROOT);
         // A malformed/untrusted header must not inject log lines or credentials.
         return type.isEmpty() || type.matches("[a-z0-9.+-]+/[a-z0-9.+*-]+") ? type : "<invalid>";
-    }
-
-    private static String imageContentType(byte[] bytes) throws IOException {
-        if (startsWith(bytes, 0, 0xff, 0xd8, 0xff)) return "image/jpeg";
-        if (startsWith(bytes, 0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
-        if (startsWith(bytes, 0, 'R', 'I', 'F', 'F') && startsWith(bytes, 8, 'W', 'E', 'B', 'P')
-                && (startsWith(bytes, 12, 'V', 'P', '8', ' ') || startsWith(bytes, 12, 'V', 'P', '8', 'L')
-                || startsWith(bytes, 12, 'V', 'P', '8', 'X'))) return "image/webp";
-        throw new IOException("Figure response body is not a supported JPEG, PNG or WebP image");
-    }
-
-    private static boolean startsWith(byte[] bytes, int offset, int... signature) {
-        if (bytes.length < offset + signature.length) return false;
-        for (int i = 0; i < signature.length; i++) {
-            if ((bytes[offset + i] & 0xff) != signature[i]) return false;
-        }
-        return true;
     }
 
     private static String extension(String type) {

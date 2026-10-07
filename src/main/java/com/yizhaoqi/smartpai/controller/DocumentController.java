@@ -1,5 +1,9 @@
 package com.yizhaoqi.smartpai.controller;
 
+import com.yizhaoqi.smartpai.exception.CustomException;
+import com.yizhaoqi.smartpai.service.OrgTagCacheService;
+import com.yizhaoqi.smartpai.service.SharedContentAclService;
+import com.yizhaoqi.smartpai.repository.UserRepository;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.OrganizationTag;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
@@ -16,7 +20,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -109,6 +112,36 @@ public class DocumentController {
         }
     }
 
+    @Autowired
+    private SharedContentAclService contentAcl;
+    @Autowired
+    private OrgTagCacheService orgTagCache;
+    @Autowired
+    private UserRepository permissionUserRepository;
+
+    public record PermissionUpdate(@jakarta.validation.constraints.Size(max = 50) String orgTag, Boolean isPublic) {}
+
+    @PostMapping("/{fileMd5}/permissions")
+    public ResponseEntity<?> changePermissions(@PathVariable String fileMd5,
+            @RequestAttribute("userId") String userId, @RequestAttribute("role") String role,
+            @jakarta.validation.Valid @RequestBody PermissionUpdate update) {
+        if (update.isPublic() == null) return ResponseEntity.badRequest().body(Map.of("message", "isPublic 必填"));
+        String org = update.orgTag();
+        if (org != null && org.isBlank()) org = null;
+        if (org != null && !"ADMIN".equals(role)) {
+            // The helper resolves the authenticated numeric id to its username before loading tags.
+            String requestedOrg = org;
+            if (requestedOrg.startsWith("PRIVATE_") || !orgTagCache.getUserEffectiveOrgTags(permissionUserRepository.findById(Long.valueOf(userId)).orElseThrow().getUsername()).contains(requestedOrg))
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("message", "无权授权此组织"));
+        }
+        try {
+            contentAcl.changePermissions(fileMd5, userId, org, update.isPublic());
+            return ResponseEntity.ok(Map.of("code", 200, "message", "权限已更新，索引权限异步同步"));
+        } catch (CustomException failure) {
+            return ResponseEntity.status(failure.getStatus()).body(Map.of("message", failure.getMessage()));
+        }
+    }
+
     @PostMapping("/{fileMd5}/reindex")
     public ResponseEntity<?> reindexDocument(
             @PathVariable String fileMd5,
@@ -152,6 +185,9 @@ public class DocumentController {
             response.put("message", "文档索引重建成功");
             response.put("data", data);
             return ResponseEntity.ok(response);
+        } catch (CustomException failure) {
+            monitor.end("请求被拒绝: " + failure.getMessage());
+            return ResponseEntity.status(failure.getStatus()).body(Map.of("code", failure.getStatus().value(), "message", failure.getMessage()));
         } catch (Exception e) {
             LogUtils.logBusinessError("REINDEX_DOCUMENT", userId, "重建文档索引失败: fileMd5=%s", e, fileMd5);
             monitor.end("重建失败: " + e.getMessage());
@@ -203,6 +239,9 @@ public class DocumentController {
                     "message", "已提交异步向量化重试任务",
                     "data", data
             ));
+        } catch (CustomException failure) {
+            monitor.end("请求被拒绝: " + failure.getMessage());
+            return ResponseEntity.status(failure.getStatus()).body(Map.of("code", failure.getStatus().value(), "message", failure.getMessage()));
         } catch (Exception e) {
             LogUtils.logBusinessError("RETRY_VECTORIZATION_ASYNC", userId, "异步向量化重试失败: fileMd5=%s", e, fileMd5);
             monitor.end("异步向量化重试失败: " + e.getMessage());
@@ -761,7 +800,8 @@ public class DocumentController {
             LogUtils.logBusiness("GET_REFERENCE_DETAIL", "system",
                     "接收到获取引用详情请求: sessionId=%s, referenceNumber=%s", sessionId, referenceNumber);
 
-            ChatHandler.ReferenceInfo detail = chatHandler.getReferenceDetail(sessionId, referenceNumber);
+            RequestAuthContext authContext = resolveRequestAuthContext(authorization, null);
+            ChatHandler.ReferenceInfo detail = chatHandler.getReferenceDetailForUser(sessionId, referenceNumber, authContext.userId());
             if (detail == null) {
                 monitor.end("未找到引用映射");
                 Map<String, Object> response = new HashMap<>();
@@ -770,7 +810,6 @@ public class DocumentController {
                 return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
             }
 
-            RequestAuthContext authContext = resolveRequestAuthContext(authorization, null);
             if (authContext.userId() != null) {
                 boolean hasAccess = documentService.getAccessibleFiles(authContext.userId(), authContext.orgTags()).stream()
                         .anyMatch(file -> file.getFileMd5().equals(detail.fileMd5()));
@@ -796,6 +835,16 @@ public class DocumentController {
             data.put("evidenceSnippet", detail.evidenceSnippet());
             data.put("score", detail.score());
             data.put("chunkId", detail.chunkId());
+            data.put("entryId", detail.entryId());
+            data.put("documentType", detail.documentType());
+            data.put("processingGeneration", detail.processingGeneration());
+            data.put("figureIndex", detail.figureIndex());
+            data.put("figureLabel", detail.figureLabel());
+            data.put("bbox", detail.bbox());
+            data.put("caption", detail.caption());
+            data.put("description", detail.description());
+            data.put("ocrText", detail.ocrText());
+            data.put("degraded", detail.degraded());
 
             Map<String, Object> response = new HashMap<>();
             response.put("code", 200);

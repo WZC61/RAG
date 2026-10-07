@@ -165,9 +165,10 @@ security:
 
 logging:
   level:
-    org.springframework.web: ${LOG_LEVEL_WEB:DEBUG}
+    # WebSocket paths contain credentials; enable targeted controller logs instead of HTTP path DEBUG.
+    org.springframework.web: ${LOG_LEVEL_WEB:INFO}
     org.springframework.boot.autoconfigure.web.servlet: ${LOG_LEVEL_AUTOCONFIG:DEBUG}
-    org.springframework.security: ${LOG_LEVEL_SECURITY:DEBUG}
+    org.springframework.security: ${LOG_LEVEL_SECURITY:INFO}
     com.yizhaoqi.smartpai: ${LOG_LEVEL_APP:DEBUG}
     io.minio: ${LOG_LEVEL_MINIO:DEBUG}
 

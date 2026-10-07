@@ -96,7 +96,7 @@ class ProcessingOutboxTest {
         when(config.getFileProcessingTopic()).thenReturn("file-processing-topic1");
         urls = mock(UploadService.class);
         when(urls.generateMergedObjectUrl(anyString())).thenReturn("https://storage/fresh-url");
-        dispatcher = new ProcessingOutboxDispatcher(outbox, status, kafka, config, mapper, urls);
+        dispatcher = new ProcessingOutboxDispatcher(processOnlyRepository(), status, kafka, config, mapper, urls);
     }
 
     @SuppressWarnings("unchecked")
@@ -157,7 +157,7 @@ class ProcessingOutboxTest {
         assertThrows(Exception.class, () -> failingCompletion().complete("1", "md5"));
         assertEquals(FileUpload.STATUS_MERGING, file("1").getStatus());
         assertNull(file("1").getVectorizationStatus());
-        assertEquals(0, outbox.count());
+        assertEquals(0, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(0, contents.count());
     }
 
@@ -172,7 +172,7 @@ class ProcessingOutboxTest {
             files.saveAndFlush(file);
         });
         completion.complete("1", "md5");
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(1, contents.count());
         assertEquals(first.getId(), event("1").getId());
         assertEquals(FileUpload.VECTORIZATION_STATUS_COMPLETED, file("1").getVectorizationStatus());
@@ -184,7 +184,7 @@ class ProcessingOutboxTest {
         createFile("2");
         completion.complete("1", "md5");
         completion.complete("2", "md5");
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(1, contents.count());
         assertEquals(2, files.count());
         assertEquals(FileUpload.STATUS_COMPLETED, file("2").getStatus());
@@ -266,7 +266,7 @@ class ProcessingOutboxTest {
             KafkaOperations.OperationsCallback<String, Object, Boolean> callback = invocation.getArgument(0);
             return callback.doInOperations(kafka);
         }).when(kafka).executeInTransaction(any());
-        new ProcessingOutboxDispatcher(outbox, status, kafka, config, mapper, urls).dispatchPending();
+        new ProcessingOutboxDispatcher(processOnlyRepository(), status, kafka, config, mapper, urls).dispatchPending();
         assertEquals(ProcessingOutbox.Status.SENT, event("1").getStatus());
         assertEquals(1, event("1").getRetryCount());
         assertNull(event("1").getLastError());
@@ -292,7 +292,7 @@ class ProcessingOutboxTest {
         completion.complete("1", "md5");
         ProcessingOutboxStatusService failing = mock(ProcessingOutboxStatusService.class);
         doThrow(new IllegalStateException("database unavailable")).when(failing).markSent(anyLong());
-        new ProcessingOutboxDispatcher(outbox, failing, kafka, config, mapper, urls).dispatchPending();
+        new ProcessingOutboxDispatcher(processOnlyRepository(), failing, kafka, config, mapper, urls).dispatchPending();
         assertEquals(ProcessingOutbox.Status.PENDING, event("1").getStatus());
         dispatcher.dispatchPending();
         verify(kafka, times(2)).send(eq("file-processing-topic1"), eq("md5"), any());
@@ -328,6 +328,7 @@ class ProcessingOutboxTest {
         when(minio.getPresignedObjectUrl(any())).thenReturn("https://storage/fresh");
         UploadService uploads = new UploadService();
         ReflectionTestUtils.setField(uploads, "fileUploadRepository", files);
+        ReflectionTestUtils.setField(uploads, "fileContentRepository", contents);
         ReflectionTestUtils.setField(uploads, "chunkInfoRepository", chunks);
         ReflectionTestUtils.setField(uploads, "minioClient", minio);
         ReflectionTestUtils.setField(uploads, "uploadCompletionService", failingCompletion());
@@ -338,15 +339,25 @@ class ProcessingOutboxTest {
         var request = new UploadController.MergeRequest("md5", "test.pdf");
         assertEquals(503, controller.mergeFile(request, "1").getStatusCode().value());
         assertEquals(FileUpload.STATUS_UPLOADING, file("1").getStatus());
-        assertEquals(0, outbox.count());
+        assertEquals(0, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(1, chunks.count());
         verify(minio, never()).removeObject(any());
         ReflectionTestUtils.setField(uploads, "uploadCompletionService", completion);
         assertEquals(200, controller.mergeFile(request, "1").getStatusCode().value());
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(0, chunks.count());
         verify(minio, never()).composeObject(any());
         verifyNoInteractions(kafka);
+    }
+
+    private ProcessingOutboxRepository processOnlyRepository() {
+        var repository = mock(ProcessingOutboxRepository.class);
+        when(repository.findByStatusOrderByIdAsc(any(), any())).thenAnswer(invocation ->
+                outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType()))
+                        .filter(e -> e.getStatus() == invocation.getArgument(0))
+                        .sorted(java.util.Comparator.comparing(ProcessingOutbox::getId))
+                        .limit(invocation.<org.springframework.data.domain.Pageable>getArgument(1).getPageSize()).toList());
+        return repository;
     }
 
     private FileUpload file(String userId) {
@@ -380,7 +391,7 @@ class ProcessingOutboxTest {
             a.get(15, TimeUnit.SECONDS);
             b.get(15, TimeUnit.SECONDS);
             assertEquals(1, contents.count());
-            assertEquals(1, outbox.count());
+            assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
             assertEquals(2, files.count());
             assertEquals(FileUpload.STATUS_COMPLETED, file("1").getStatus());
             assertEquals(FileUpload.STATUS_COMPLETED, file("2").getStatus());
@@ -401,7 +412,7 @@ class ProcessingOutboxTest {
         completion.completeInstantUpload("2", "md5");
         assertEquals(FileUpload.STATUS_COMPLETED, file("2").getStatus());
         assertEquals(1, contents.count());
-        assertEquals(0, outbox.count());
+        assertEquals(0, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
     }
 
     @Test
@@ -415,14 +426,14 @@ class ProcessingOutboxTest {
         createFile("2");
         files.updateStatusIfCurrent(file("2").getId(), FileUpload.STATUS_MERGING, FileUpload.STATUS_UPLOADING);
         completion.completeInstantUpload("2", "md5");
-        assertEquals(1, outbox.count());
+        assertEquals(1, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
         assertEquals(FileContent.ProcessingStatus.PARSED, contents.findByFileMd5("md5").orElseThrow().getProcessingStatus());
     }
 
     @Test
     void processingStateAndUsageAreStoredOnlyOnContentAndStaleGenerationCannotOverwrite() throws Exception {
         completion.complete("1", "md5");
-        FileContentProcessingService processing = proxy(new FileContentProcessingService(contents));
+        FileContentProcessingService processing = proxy(new FileContentProcessingService(contents, org.mockito.Mockito.mock(com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository.class)));
         assertTrue(processing.needsProcessing("md5", 1));
         contents.updateEstimates("md5", 30L, 2);
         processing.parsed("md5", 1);
@@ -448,7 +459,7 @@ class ProcessingOutboxTest {
     @Test
     void terminalFailureIsDurableAndSameGenerationCannotResumeOrEraseFinalError() throws Exception {
         completion.complete("1", "md5");
-        FileContentProcessingService processing = proxy(new FileContentProcessingService(contents));
+        FileContentProcessingService processing = proxy(new FileContentProcessingService(contents, org.mockito.Mockito.mock(com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository.class)));
         processing.recordError("md5", 1, new IOException("parse retry"));
         assertEquals(FileContent.ProcessingStatus.MERGED, processing.checkpoint("md5", 1));
         processing.parsed("md5", 1);
@@ -481,6 +492,6 @@ class ProcessingOutboxTest {
         verify(kafka, times(2)).send(eq("file-processing-topic1"), eq("md5"), tasks.capture());
         assertEquals(List.of("PROCESS_CONTENT:md5:1", "PROCESS_CONTENT:md5:2"),
                 tasks.getAllValues().stream().map(FileProcessingTask::getEventId).toList());
-        assertEquals(2, outbox.count());
+        assertEquals(2, outbox.findAll().stream().filter(e -> FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(e.getEventType())).count());
     }
 }

@@ -1,5 +1,8 @@
 package com.yizhaoqi.smartpai.service;
 
+import org.springframework.http.HttpStatus;
+import com.yizhaoqi.smartpai.exception.CustomException;
+import com.yizhaoqi.smartpai.repository.FileContentRepository;
 import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.model.FileUpload;
@@ -22,7 +25,6 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.data.redis.core.StringRedisTemplate;
-
 import java.io.ByteArrayOutputStream;
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -106,85 +108,31 @@ public class DocumentService {
      *
      * @param fileMd5 文件MD5
      */
-    @Transactional
+    @Autowired
+    private SharedContentAclService contentAcl;
+    @Autowired
+    private FileContentRepository fileContents;
+
     public void deleteDocument(String fileMd5, String userId) {
-        logger.info("开始删除文档: {}", fileMd5);
-        
-        try {
-            // 获取文件信息以获取文件名
-            FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
-                    .orElseThrow(() -> new RuntimeException("文件不存在"));
-            
-            // 1. 删除Elasticsearch中的数据
-            try {
-                elasticsearchService.deleteByFileMd5(fileMd5);
-                logger.info("成功从Elasticsearch删除文档: {}", fileMd5);
-            } catch (Exception e) {
-                logger.error("从Elasticsearch删除文档时出错: {}", fileMd5, e);
-                // 继续删除其他数据
-            }
-            
-            // 2. 删除MinIO中的文件（使用MD5作为对象路径）
-            try {
-                String objectName = "merged/" + fileUpload.getFileMd5();
-                minioClient.removeObject(
-                        RemoveObjectArgs.builder()
-                                .bucket("uploads")
-                                .object(objectName)
-                                .build()
-                );
-                logger.info("成功从MinIO删除文件: {}", objectName);
-            } catch (Exception e) {
-                logger.warn("使用MD5路径删除文件失败，尝试使用文件名路径: {}", fileMd5);
-                // 降级：尝试使用旧的文件名路径（兼容旧数据）
-                try {
-                    String oldObjectName = "merged/" + fileUpload.getFileName();
-                    minioClient.removeObject(
-                            RemoveObjectArgs.builder()
-                                    .bucket("uploads")
-                                    .object(oldObjectName)
-                                    .build()
-                    );
-                    logger.info("使用旧路径成功从MinIO删除文件: {}", oldObjectName);
-                } catch (Exception ex) {
-                    logger.error("从MinIO删除文件时出错（新旧路径都失败）: {}", fileMd5, ex);
-                    // 继续删除其他数据
-                }
-            }
+        contentAcl.deleteReference(fileMd5, userId);
+        // Cache invalidation is best effort; every read still checks current permissions.
+        invalidatePdfSinglePagePreviewCache(fileMd5);
+    }
 
-            invalidatePdfSinglePagePreviewCache(fileMd5);
-            
-            // 3. 删除DocumentVector记录
-            try {
-                documentVectorRepository.deleteByFileMd5(fileMd5);
-                logger.info("成功删除文档向量记录: {}", fileMd5);
-            } catch (Exception e) {
-                logger.error("删除文档向量记录时出错: {}", fileMd5, e);
-                // 继续删除其他数据
-            }
+    private void protectSharedContentFromLegacyReindex(String md5) {
+        if (fileContents.findByFileMd5(md5).isPresent() || fileUploadRepository.countByFileMd5(md5) > 1)
+            throw new CustomException(
+                    "内容级/共享文件不支持旧 REINDEX 入口", HttpStatus.CONFLICT);
+    }
 
-            // 删除分片元数据，避免同 MD5 文件再次上传时误判分片已经存在
-            try {
-                int deletedChunkRows = chunkInfoRepository.deleteByUserIdAndFileMd5(userId, fileMd5);
-                logger.info("成功删除文档分片元数据: fileMd5={}, deletedRows={}", fileMd5, deletedChunkRows);
-            } catch (Exception e) {
-                logger.error("删除文档分片元数据时出错: {}", fileMd5, e);
-                // 继续删除其他数据
-            }
-            
-            // 4. 删除FileUpload记录
-            fileUploadRepository.deleteByFileMd5(fileMd5);
-            logger.info("成功删除文件上传记录: {}", fileMd5);
-            
-            logger.info("文档删除完成: {}", fileMd5);
-        } catch (Exception e) {
-            logger.error("删除文档过程中发生错误: {}", fileMd5, e);
-            throw new RuntimeException("删除文档失败: " + e.getMessage(), e);
-        }
+    /** Delayed legacy messages must not append chunks to a content-owned or shared document. */
+    public boolean isLegacyUploadSuperseded(String md5) {
+        return fileContents.findByFileMd5(md5).isPresent() || fileUploadRepository.countByFileMd5(md5) > 1;
     }
 
     @Transactional
     public VectorizationService.VectorizationUsageResult reindexDocument(String fileMd5, String requesterId) {
+        protectSharedContentFromLegacyReindex(fileMd5);
         logger.info("开始重建文档索引: fileMd5={}, requesterId={}", fileMd5, requesterId);
 
         FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5)
@@ -240,6 +188,7 @@ public class DocumentService {
 
     @Transactional
     public FileUpload enqueueAsyncVectorizationRetry(String fileMd5, String requesterId) {
+        protectSharedContentFromLegacyReindex(fileMd5);
         FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5)
                 .orElseThrow(() -> new RuntimeException("文件不存在"));
 
@@ -375,16 +324,7 @@ public class DocumentService {
             logger.debug("用户有效组织标签: {}", userEffectiveTags);
             
             // 使用有效标签查询文件
-            List<FileUpload> files;
-            if (userEffectiveTags.isEmpty()) {
-                // 如果用户没有任何组织标签，只返回自己的文件和公开文件
-                files = fileUploadRepository.findByUserIdOrIsPublicTrue(userDbId);
-                logger.debug("用户无组织标签，仅返回个人和公开文件");
-            } else {
-                // 查询用户可访问的所有文件（考虑层级标签）
-                files = fileUploadRepository.findAccessibleFilesWithTags(userDbId, userEffectiveTags);
-                logger.debug("使用有效组织标签查询文件");
-            }
+            List<FileUpload> files = fileUploadRepository.findAccessibleFilesWithTags(userDbId, userEffectiveTags);
 
             files = deduplicateFileUploads(files);
             logger.info("成功获取用户可访问文件列表: userId={}, fileCount={}", userId, files.size());
@@ -543,7 +483,9 @@ public class DocumentService {
             }
 
             if (changed) {
-                fileUploadRepository.save(file);
+                // A detached legacy-status backfill must never overwrite a concurrent ACL change.
+                fileUploadRepository.backfillLegacyStatus(file.getId(), file.getVectorizationStatus(),
+                        file.getVectorizationErrorMessage());
             }
         }
     }

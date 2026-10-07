@@ -47,6 +47,12 @@ public class UploadCompletionService {
     }
 
     private void completeInternal(String userId, String fileMd5, boolean instant) throws JsonProcessingException {
+        FileUpload reference = files.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId)
+                .orElseThrow(() -> new CustomException("文件记录不存在", HttpStatus.NOT_FOUND));
+        String objectPath = "merged/" + fileMd5;
+        contents.ensureContent(fileMd5, objectPath, reference.getTotalSize());
+        FileContent content = contents.findForUpdate(fileMd5).orElseThrow();
+        // Every relation mutation takes the content lock before the relation lock.
         FileUpload file = files.findForUploadCompletion(userId, fileMd5)
                 .orElseThrow(() -> new CustomException("文件记录不存在", HttpStatus.NOT_FOUND));
         if (file.getStatus() != FileUpload.STATUS_MERGING && file.getStatus() != FileUpload.STATUS_COMPLETED
@@ -56,11 +62,13 @@ public class UploadCompletionService {
         if (instant && file.getStatus() == FileUpload.STATUS_MERGING) {
             throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
         }
-        String objectPath = "merged/" + fileMd5;
-        contents.ensureContent(fileMd5, objectPath, file.getTotalSize());
-        FileContent content = contents.findForUpdate(fileMd5).orElseThrow();
         if (content.getTotalSize() != file.getTotalSize() || !objectPath.equals(content.getObjectPath())) {
             throw new CustomException("文件内容元数据与最终对象不一致", HttpStatus.CONFLICT);
+        }
+        if (content.getDeletedAt() != null) {
+            content.setDeletedAt(null);
+            content.setProcessingStatus(FileContent.ProcessingStatus.MERGED);
+            content.setProcessingError(null);
         }
         String eventId = initialEventId(fileMd5, content.getProcessingGeneration());
         ProcessingOutbox event = null;
@@ -73,11 +81,13 @@ public class UploadCompletionService {
             event.setPayload(mapper.writeValueAsString(new ProcessingOutboxPayload(eventId, fileMd5,
                     objectPath, content.getProcessingGeneration(), file.getFileName(), userId)));
         }
-        if (file.getStatus() != FileUpload.STATUS_COMPLETED) {
+        boolean changed = file.getStatus() != FileUpload.STATUS_COMPLETED;
+        if (changed) {
             file.setStatus(FileUpload.STATUS_COMPLETED);
             file.setMergedAt(LocalDateTime.now());
         }
         files.saveAndFlush(file);
         if (event != null) outbox.saveAndFlush(event);
+        if (changed) outbox.saveAndFlush(AclChangedPayload.event(mapper, fileMd5, null));
     }
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { sanitizeReferenceMappings } from '@/utils/references';
 const chatStore = useChatStore();
 const { connectionStatus, input, isRateLimited, list, rateLimitRemainingSeconds, wsData } = storeToRefs(chatStore);
 
@@ -103,8 +104,9 @@ function handleCompletionPayload(assistant: Api.Chat.Message, payload: Record<st
   }
 
   if (payload.referenceMappings) {
-    assistant.referenceMappings = payload.referenceMappings;
+    assistant.referenceMappings = sanitizeReferenceMappings(payload.referenceMappings);
   }
+  assistant.retrievalStatus = payload.retrievalStatus;
   markExecutingToolsAsSuccess(assistant);
   stopGenerationStatusMonitor();
 }

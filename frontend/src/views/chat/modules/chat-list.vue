@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { NScrollbar } from 'naive-ui';
-import { VueMarkdownItProvider } from '@/vendor/vue-markdown-shiki';
+import { VueMarkdownItProvider, safeMarkdownOptions } from '@/vendor/vue-markdown-shiki';
 import ChatMessage from './chat-message.vue';
 
 defineOptions({
@@ -102,7 +102,7 @@ const showEmpty = computed(() => !loading.value && list.value.length === 0);
       <NScrollbar v-else ref="scrollbarRef" class="flex-1">
         <NSpin :show="loading">
           <div class="mx-auto w-full max-w-[960px] px-4">
-            <VueMarkdownItProvider>
+            <VueMarkdownItProvider :options="safeMarkdownOptions">
               <ChatMessage
                 v-for="(item, index) in list"
                 :key="index"

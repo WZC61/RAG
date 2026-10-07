@@ -41,6 +41,9 @@ public class FileContent {
     private LocalDateTime updatedAt;
     @Column(name = "indexed_at")
     private LocalDateTime indexedAt;
+    /** Retain the generation counter after physical cleanup to reject delayed old Kafka tasks. */
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
 
     @PrePersist
     void onCreate() {

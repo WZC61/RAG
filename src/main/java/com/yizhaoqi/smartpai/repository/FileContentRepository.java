@@ -6,9 +6,14 @@ import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 import java.util.Optional;
+import java.util.Collection;
+import java.util.List;
 
 public interface FileContentRepository extends JpaRepository<FileContent, Long> {
     Optional<FileContent> findByFileMd5(String fileMd5);
+
+    List<FileContent> findByFileMd5InAndProcessingStatusAndDeletedAtIsNull(
+            Collection<String> fileMd5s, FileContent.ProcessingStatus status);
 
     // The unique-key upsert also serializes simultaneous first creators in MySQL.
     // Do not catch a failed JPA insert inside the completion transaction: it is rollback-only.

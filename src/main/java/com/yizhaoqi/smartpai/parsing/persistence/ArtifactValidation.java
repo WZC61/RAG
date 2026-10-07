@@ -18,11 +18,15 @@ final class ArtifactValidation {
     }
 
     static void chunks(List<TextChunk> chunks) {
+        chunks(chunks, true);
+    }
+
+    static void chunks(List<TextChunk> chunks, boolean requirePageNumbers) {
         if (chunks == null) throw new IllegalArgumentException("Text chunks must not be null");
         for (int i = 0; i < chunks.size(); i++) {
             TextChunk chunk = chunks.get(i);
             if (chunk == null || chunk.chunkIndex() == null || chunk.chunkIndex() != i + 1
-                    || chunk.pageNumber() == null || chunk.pageNumber() < 1
+                    || (chunk.pageNumber() == null ? requirePageNumbers : chunk.pageNumber() < 1)
                     || chunk.text() == null || chunk.text().isBlank()
                     || chunk.anchorText() == null || chunk.anchorText().isBlank())
                 throw new IllegalArgumentException("Incomplete text chunk or non-contiguous document index");

@@ -59,6 +59,7 @@ CREATE TABLE file_content (
     actual_chunk_count INT DEFAULT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME DEFAULT NULL COMMENT '物理内容清理时间，保留代次以拒绝旧任务',
     indexed_at DATETIME DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_file_content_md5 (file_md5)

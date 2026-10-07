@@ -7,6 +7,7 @@ import co.elastic.clients.elasticsearch.indices.IndicesStatsResponse;
 import co.elastic.clients.elasticsearch.indices.stats.IndicesStats;
 import com.yizhaoqi.smartpai.client.DeepSeekClient;
 import com.yizhaoqi.smartpai.entity.SearchResult;
+import com.yizhaoqi.smartpai.entity.RetrievalResponse;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -26,13 +27,14 @@ public class AgentToolRegistry {
 
     private static final String KNOWLEDGE_INDEX = "knowledge_base";
     private static final int DEFAULT_TOP_K = 5;
-    private static final int MAX_SEARCH_DOCS = 20;
+    private static final int MAX_SEARCH_DOCS = HybridSearchService.MAX_TOP_K;
 
     private final HybridSearchService hybridSearchService;
     private final DeepSeekClient deepSeekClient;
     private final StringRedisTemplate stringRedisTemplate;
     private final ElasticsearchClient elasticsearchClient;
     private final FileUploadRepository fileUploadRepository;
+    private final RagContextAssembler contextAssembler;
     private final List<AgentTool> tools;
     private final Map<String, ToolHandler> handlers;
 
@@ -40,12 +42,14 @@ public class AgentToolRegistry {
                              DeepSeekClient deepSeekClient,
                              StringRedisTemplate stringRedisTemplate,
                              ElasticsearchClient elasticsearchClient,
-                             FileUploadRepository fileUploadRepository) {
+                             FileUploadRepository fileUploadRepository,
+                             RagContextAssembler contextAssembler) {
         this.hybridSearchService = hybridSearchService;
         this.deepSeekClient = deepSeekClient;
         this.stringRedisTemplate = stringRedisTemplate;
         this.elasticsearchClient = elasticsearchClient;
         this.fileUploadRepository = fileUploadRepository;
+        this.contextAssembler = contextAssembler;
         this.tools = List.of(
                 searchKnowledgeTool(),
                 generateSummaryTool(),
@@ -88,37 +92,62 @@ public class AgentToolRegistry {
     private ToolExecutionResult executeSearchKnowledge(Map<String, Object> arguments,
                                                        String userId,
                                                        Consumer<String> onChunk) {
-        requireUserId(userId);
-        String query = getRequiredString(arguments, "query");
-        int topK = getInt(arguments, "topK", DEFAULT_TOP_K, 1, MAX_SEARCH_DOCS);
-
-        List<SearchResult> results = hybridSearchService.searchWithPermission(query, userId, topK);
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("query", query);
-        data.put("topK", topK);
-        data.put("results", results);
-        return new ToolExecutionResult("search_knowledge", true, formatSearchResults(results), data);
+        return executeEvidenceTool("search_knowledge", arguments, userId, onChunk, contextAssembler.newSession(), null, false);
     }
 
     private ToolExecutionResult executeGenerateSummary(Map<String, Object> arguments,
-                                                       String userId,
-                                                       Consumer<String> onChunk) {
+                                                       String userId, Consumer<String> onChunk) {
+        return executeEvidenceTool("generate_summary", arguments, userId, onChunk, contextAssembler.newSession(), null, false);
+    }
+
+    /** Answer-scoped registry shared by proactive retrieval and all subsequent tools. */
+    public ToolExecutionResult executeToolWithEvidence(String name, Map<String,Object> arguments, String userId,
+            Consumer<String> onChunk, RagContextAssembler.Session session,
+            Consumer<RagContextAssembler.Context> onEvidence) {
+        if ("search_knowledge".equals(name) || "generate_summary".equals(name)) {
+            return executeEvidenceTool(name, arguments == null ? Map.of() : arguments, userId, onChunk,
+                    session, onEvidence, true);
+        }
+        return executeTool(name, arguments, userId, onChunk);
+    }
+
+    private ToolExecutionResult executeEvidenceTool(String name, Map<String,Object> arguments, String userId,
+            Consumer<String> onChunk, RagContextAssembler.Session session,
+            Consumer<RagContextAssembler.Context> onEvidence, boolean sharedContext) {
         requireUserId(userId);
-        String topic = getRequiredString(arguments, "topic");
-        int maxDocs = getInt(arguments, "maxDocs", DEFAULT_TOP_K, 1, MAX_SEARCH_DOCS);
-
-        List<SearchResult> results = hybridSearchService.searchWithPermission(topic, userId, maxDocs);
-        String summary = deepSeekClient.summarize(userId, topic, results, onChunk);
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("topic", topic);
-        data.put("maxDocs", maxDocs);
+        boolean summary = "generate_summary".equals(name);
+        String query = getRequiredString(arguments, summary ? "topic" : "query");
+        int topK = getInt(arguments, summary ? "maxDocs" : "topK", DEFAULT_TOP_K, 1, MAX_SEARCH_DOCS);
+        RetrievalResponse retrieval = hybridSearchService.retrieveWithPermission(query, userId, topK);
+        RagContextAssembler.Context context = session.add(retrieval, query);
+        // Publish references before the first summary chunk, including when its stream later fails.
+        if (onEvidence != null) onEvidence.accept(session.snapshot());
+        List<SearchResult> results = context.evidence().stream()
+                .map(e -> SearchResult.fromRetrieval(e.source(), retrieval)).toList();
+        Map<String,Object> data = new LinkedHashMap<>();
+        data.put(summary ? "topic" : "query", query);
+        data.put(summary ? "maxDocs" : "topK", topK);
+        data.put(summary ? "sources" : "results", results);
+        data.put("evidenceNumbers", context.evidence().stream().map(RagContextAssembler.Evidence::number).toList());
         data.put("sourceCount", results.size());
-        data.put("sources", results);
+        addRetrievalMetadata(data, retrieval);
+        String content;
+        if (summary) {
+            content = deepSeekClient.summarizeContext(userId, query, context, onChunk);
+        } else {
+            content = sharedContext
+                    ? "检索状态：" + (context.degraded() ? "降级" : "正常")
+                        + "；已加入当前上下文的来源编号：" + data.get("evidenceNumbers")
+                        + "。证据正文见系统上下文；资料不足时应明确说明。"
+                    : context.text();
+        }
+        return new ToolExecutionResult(name, true, content, data, summary && onChunk != null);
+    }
 
-        String content = "主题：" + topic + "\n"
-                + "检索片段数：" + results.size() + "\n\n"
-                + summary;
-        return new ToolExecutionResult("generate_summary", true, content, data, onChunk != null);
+    private void addRetrievalMetadata(Map<String, Object> data, RetrievalResponse retrieval) {
+        data.put("retrievalMode", retrieval.getRetrievalMode());
+        data.put("degraded", retrieval.isDegraded());
+        data.put("failedChannels", retrieval.failedChannels());
     }
 
     private ToolExecutionResult executeSubmitFeedback(Map<String, Object> arguments,
@@ -179,7 +208,7 @@ public class AgentToolRegistry {
     private AgentTool searchKnowledgeTool() {
         return new AgentTool(
                 "search_knowledge",
-                "在知识库中搜索与用户问题相关的文档片段。当用户问题的答案可能依赖已上传资料、企业/项目/产品/系统内部信息、专有名词、事实依据、定义、功能、使用方式、实现细节、背景、流程或引用来源时应调用；即使用户没有明确说“查询知识库”，只要问题不像纯通用常识也应先检索。普通问候、闲聊、纯创作、翻译、通用代码/常识问题，或用户明确要求不要查知识库时不要调用。",
+                "补充检索知识库中的 TEXT / FIGURE 证据。服务端已完成初始检索，仅在当前上下文不足、需要补充具体资料时调用。来源编号与当前回答共用，重复来源不会重新编号。",
                 objectSchema(Map.of(
                         "query", stringSchema("用于知识库检索的查询语句。应保留用户原话中的核心实体、缩写和限定词，可包含原始问句和必要的等价改写；不要替换成固定关键词。"),
                         "topK", integerSchema("返回的片段数量，默认 5。")
@@ -242,34 +271,6 @@ public class AgentToolRegistry {
         return schema;
     }
 
-    private String formatSearchResults(List<SearchResult> results) {
-        if (results == null || results.isEmpty()) {
-            return "未检索到相关知识库片段。";
-        }
-
-        StringBuilder output = new StringBuilder("检索到 ").append(results.size()).append(" 个知识库片段。")
-                .append("请基于这些片段回答用户问题；不得声称知识库暂无相关信息。")
-                .append("如果片段信息不足，请说明“基于已检索片段只能确认……”并标注来源编号。");
-        for (int i = 0; i < results.size(); i++) {
-            SearchResult result = results.get(i);
-            output.append("\n\n[").append(i + 1).append("] ");
-            if (result.getFileName() != null && !result.getFileName().isBlank()) {
-                output.append(result.getFileName()).append(" ");
-            }
-            output.append("(fileMd5=").append(result.getFileMd5())
-                    .append(", chunkId=").append(result.getChunkId());
-            if (result.getPageNumber() != null) {
-                output.append(", page=").append(result.getPageNumber());
-            }
-            if (result.getScore() != null) {
-                output.append(", score=").append(String.format(Locale.ROOT, "%.4f", result.getScore()));
-            }
-            output.append(")\n")
-                    .append(limitText(result.getMatchedChunkText() != null ? result.getMatchedChunkText() : result.getTextContent(), 1200));
-        }
-        return output.toString();
-    }
-
     private String formatKnowledgeStats(Map<String, Object> data) {
         return "知识库统计："
                 + "\n- MySQL 文档总数：" + data.get("documentCount")
@@ -315,16 +316,6 @@ public class AgentToolRegistry {
             value = Integer.parseInt(String.valueOf(raw));
         }
         return Math.max(min, Math.min(max, value));
-    }
-
-    private String limitText(String text, int maxChars) {
-        if (text == null) {
-            return "";
-        }
-        if (text.length() <= maxChars) {
-            return text;
-        }
-        return text.substring(0, maxChars) + "...";
     }
 
     private String nullToDash(Object value) {

@@ -55,8 +55,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
         String userId = extractUserId(jwtToken);
         chatSessionRegistry.registerSession(userId, session);
-        logger.info("WebSocket连接已建立，用户ID: {}，会话ID: {}，URI路径: {}",
-                userId, session.getId(), session.getUri().getPath());
+        logger.info("WebSocket连接已建立，用户ID: {}，会话ID: {}",
+                userId, session.getId());
 
         // 发送会话ID到前端
         try {

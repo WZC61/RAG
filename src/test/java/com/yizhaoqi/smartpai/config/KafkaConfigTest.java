@@ -32,6 +32,8 @@ class KafkaConfigTest {
         AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
         context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("test", properties));
         context.registerBean(FileContentProcessingService.class, () -> mock(FileContentProcessingService.class));
+        context.registerBean(com.yizhaoqi.smartpai.service.SharedContentAclService.class,
+                () -> mock(com.yizhaoqi.smartpai.service.SharedContentAclService.class));
         context.register(KafkaConfig.class);
         context.refresh(); // No KafkaAdmin, listener registration or connection to a broker in this context.
         return context;

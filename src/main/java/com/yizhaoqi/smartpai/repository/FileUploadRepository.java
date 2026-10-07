@@ -7,7 +7,6 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -15,6 +14,19 @@ import java.time.LocalDateTime;
 
 @Repository
 public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
+    @Query("select (count(f) > 0) from FileUpload f where f.fileMd5 = :md5 and f.status = 1 and "
+            + "(f.userId = :userId or f.isPublic = true or "
+            + "(f.orgTag in :tags and substring(f.orgTag, 1, 8) <> 'PRIVATE_'))")
+    boolean existsAuthorizedCompletedContent(@Param("md5") String md5, @Param("userId") String userId,
+                                            @Param("tags") List<String> tags);
+
+    @Query("select distinct f.fileMd5 from FileUpload f where f.status = 1 and "
+            + "(f.userId = :userId or f.isPublic = true or "
+            + "(f.orgTag in :tags and substring(f.orgTag, 1, 8) <> 'PRIVATE_'))")
+    List<String> findAuthorizedContentIds(@Param("userId") String userId, @Param("tags") List<String> tags);
+
+    @Query("select distinct f.fileMd5 from FileUpload f where f.status = 1 and f.isPublic = true")
+    List<String> findPublicContentIds();
     @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
     @Query("select f from FileUpload f where f.userId = :userId and f.fileMd5 = :fileMd5")
     Optional<FileUpload> findForUploadCompletion(@Param("userId") String userId, @Param("fileMd5") String fileMd5);
@@ -23,6 +35,12 @@ public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
     @Modifying
     @Query("update FileUpload f set f.estimatedEmbeddingTokens = :tokens, f.estimatedChunkCount = :chunks where f.id = :id")
     int updateEstimates(@Param("id") Long id, @Param("tokens") Long tokens, @Param("chunks") Integer chunks);
+
+    @Transactional
+    @Modifying
+    @Query("update FileUpload f set f.vectorizationStatus = :status, f.vectorizationErrorMessage = :error "
+            + "where f.id = :id and f.vectorizationStatus is null")
+    int backfillLegacyStatus(@Param("id") Long id, @Param("status") String status, @Param("error") String error);
 
     Optional<FileUpload> findFirstByFileMd5OrderByCreatedAtDesc(String fileMd5);
 
@@ -34,9 +52,17 @@ public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
 
     Optional<FileUpload> findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(String fileMd5, String userId);
 
-    Optional<FileUpload> findFirstByFileMd5AndIsPublicTrueOrderByCreatedAtDesc(String fileMd5);
+    Optional<FileUpload> findFirstByFileMd5AndIsPublicTrueAndStatusOrderByCreatedAtDesc(String fileMd5, int status);
 
-    Optional<FileUpload> findFirstByFileNameAndIsPublicTrueOrderByCreatedAtDesc(String fileName);
+    default Optional<FileUpload> findFirstByFileMd5AndIsPublicTrueOrderByCreatedAtDesc(String fileMd5) {
+        return findFirstByFileMd5AndIsPublicTrueAndStatusOrderByCreatedAtDesc(fileMd5, FileUpload.STATUS_COMPLETED);
+    }
+
+    Optional<FileUpload> findFirstByFileNameAndIsPublicTrueAndStatusOrderByCreatedAtDesc(String fileName, int status);
+
+    default Optional<FileUpload> findFirstByFileNameAndIsPublicTrueOrderByCreatedAtDesc(String fileName) {
+        return findFirstByFileNameAndIsPublicTrueAndStatusOrderByCreatedAtDesc(fileName, FileUpload.STATUS_COMPLETED);
+    }
 
     Optional<FileUpload> findFirstByOrderByMergedAtDesc();
     
@@ -69,7 +95,7 @@ public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
      * @param orgTagList 用户有效的组织标签列表（包含层级结构）
      * @return 用户可访问的文件列表
      */
-    @Query("SELECT f FROM FileUpload f WHERE f.userId = :userId OR f.isPublic = true OR (f.orgTag IN :orgTagList AND f.isPublic = false)")
+    @Query("SELECT f FROM FileUpload f WHERE f.status = 1 AND (f.userId = :userId OR f.isPublic = true OR (f.orgTag IN :orgTagList AND substring(f.orgTag, 1, 8) <> 'PRIVATE_'))")
     List<FileUpload> findAccessibleFilesWithTags(@Param("userId") String userId, @Param("orgTagList") List<String> orgTagList);
     
     /**
@@ -79,7 +105,7 @@ public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
      * @param orgTagList 用户所属的组织标签列表（逗号分隔）
      * @return 用户可访问的文件列表
      */
-    @Query("SELECT f FROM FileUpload f WHERE f.userId = :userId OR f.isPublic = true OR (f.orgTag IN :orgTagList AND f.isPublic = false)")
+    @Query("SELECT f FROM FileUpload f WHERE f.status = 1 AND (f.userId = :userId OR f.isPublic = true OR (f.orgTag IN :orgTagList AND substring(f.orgTag, 1, 8) <> 'PRIVATE_'))")
     List<FileUpload> findAccessibleFiles(@Param("userId") String userId, @Param("orgTagList") List<String> orgTagList);
     
     /**

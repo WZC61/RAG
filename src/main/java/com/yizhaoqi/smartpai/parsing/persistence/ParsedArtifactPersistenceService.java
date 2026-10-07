@@ -46,7 +46,8 @@ public class ParsedArtifactPersistenceService {
         if (content.getProcessingGeneration() != generation
                 || content.getProcessingStatus() != FileContent.ProcessingStatus.MERGED) return false;
 
-        ArtifactValidation.chunks(chunks);
+        // PDF coordinator still requires positive pages; Tika text has unknown (null) pages.
+        ArtifactValidation.chunks(chunks, false);
         Objects.requireNonNull(permissions, "permissions");
         Objects.requireNonNull(preparedFigures, "preparedFigures");
         if (chunks.isEmpty() && preparedFigures.isEmpty())

@@ -1,11 +1,14 @@
 package com.yizhaoqi.smartpai.consumer;
 
+import com.yizhaoqi.smartpai.service.SharedContentAclService;
 import com.yizhaoqi.smartpai.config.KafkaConfig;
 import com.yizhaoqi.smartpai.model.FileProcessingTask;
 import com.yizhaoqi.smartpai.model.FileUpload;
 import com.yizhaoqi.smartpai.model.FileContent;
 import com.yizhaoqi.smartpai.parsing.DocumentParsingService;
+import com.yizhaoqi.smartpai.parsing.NonPdfDocumentParsingService;
 import com.yizhaoqi.smartpai.parsing.PdfSignature;
+import com.yizhaoqi.smartpai.parsing.description.FigureDescriptionService;
 import com.yizhaoqi.smartpai.parsing.persistence.LegacyPermissionContext;
 import com.yizhaoqi.smartpai.repository.FileUploadRepository;
 import com.yizhaoqi.smartpai.service.FileContentProcessingService;
@@ -17,7 +20,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
-
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -38,6 +40,12 @@ public class FileProcessingConsumer {
     private FileUploadRepository files;
     @Autowired
     private DocumentParsingService parsingService;
+    @org.springframework.beans.factory.annotation.Autowired
+    private NonPdfDocumentParsingService nonPdfParsingService;
+    @Autowired
+    private FigureDescriptionService figureDescriptions;
+    @Autowired
+    private SharedContentAclService contentAcl;
 
 
     @Autowired
@@ -61,6 +69,12 @@ public class FileProcessingConsumer {
     @KafkaListener(topics = "#{kafkaConfig.getFileProcessingTopic()}", groupId = "#{kafkaConfig.getFileProcessingGroupId()}")
     public void processTask(FileProcessingTask task) {
         if (task == null) throw new IllegalArgumentException("Missing file processing task");
+        if (FileProcessingTask.TASK_TYPE_ACL_CHANGED.equals(task.getTaskType())) {
+            if (!task.hasValidAclIdentity()) throw new IllegalArgumentException("Invalid ACL event identity");
+            try { contentAcl.reconcile(task.getFileMd5(), task.getUserId()); }
+            catch (Exception failure) { throw new IllegalStateException("ACL reconciliation failed", UrlLogSanitizer.exception(failure)); }
+            return;
+        }
         log.info("Received task: eventId={}, fileMd5={}, processingGeneration={}, taskType={}, requesterId={}",
                 UrlLogSanitizer.redact(task.getEventId()), UrlLogSanitizer.redact(task.getFileMd5()),
                 task.getProcessingGeneration(), UrlLogSanitizer.redact(task.getTaskType()),
@@ -83,6 +97,12 @@ public class FileProcessingConsumer {
                     && !FileProcessingTask.TASK_TYPE_REINDEX.equals(task.getTaskType())) {
                 throw new IllegalArgumentException("Unsupported file processing task type");
             }
+            if (FileProcessingTask.TASK_TYPE_UPLOAD_PROCESS.equals(task.getTaskType())
+                    && documentService.isLegacyUploadSuperseded(task.getFileMd5())) {
+                log.info("Skipping superseded legacy upload task: fileMd5={}",
+                        UrlLogSanitizer.redact(task.getFileMd5()));
+                return;
+            }
             documentService.markVectorizationProcessing(task.getFileMd5(), false);
         }
 
@@ -93,8 +113,7 @@ public class FileProcessingConsumer {
 
         InputStream fileStream = null;
         try {
-            // Temporary adapter for unchanged user-scoped parse/vector APIs. These are not
-            // content identity or an aggregate ACL; the ACL model is migrated in a later phase.
+            // Temporary metadata/quota adapter. ES permissions are aggregated independently.
             FileUpload legacyAccess = contentTask
                     ? files.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(task.getFileMd5(), task.getRequesterId())
                         .or(() -> files.findFirstByFileMd5OrderByCreatedAtDesc(task.getFileMd5())).orElseThrow()
@@ -110,36 +129,43 @@ public class FileProcessingConsumer {
                 fileStream = downloadFileFromStorage(task.getFilePath());
                 if (fileStream == null) throw new IOException("流为空");
                 if (!fileStream.markSupported()) fileStream = new BufferedInputStream(fileStream);
-                if (contentTask && PdfSignature.isPdf(fileStream)) {
-                    boolean committed = parsingService.parseAndPersist(task.getFileMd5(), generation, fileStream,
-                            new LegacyPermissionContext(legacyUser, legacyOrg, legacyPublic));
-                    // Persistence alone owns PARSED for PDFs. A false result can mean that another
+                if (contentTask) {
+                    LegacyPermissionContext permissions = new LegacyPermissionContext(legacyUser, legacyOrg, legacyPublic);
+                    boolean committed = PdfSignature.isPdf(fileStream)
+                            ? parsingService.parseAndPersist(task.getFileMd5(), generation, fileStream, permissions)
+                            : nonPdfParsingService.parseAndPersist(task.getFileMd5(), generation, fileStream, permissions);
+                    // Atomic persistence alone owns PARSED. A false result can mean that another
                     // task committed, or that this generation became stale while PP was running.
                     FileContent.ProcessingStatus current = contentProcessing.checkpoint(task.getFileMd5(), generation);
                     if (current == null || current == FileContent.ProcessingStatus.INDEXED
                             || current == FileContent.ProcessingStatus.FAILED) {
-                        log.info("PDF 任务已过期或终止，跳过向量化，fileMd5: {}, generation: {}, committed: {}",
+                        log.info("解析任务已过期或终止，跳过向量化，fileMd5: {}, generation: {}, committed: {}",
                                 task.getFileMd5(), generation, committed);
                         return;
                     }
                     if (current != FileContent.ProcessingStatus.PARSED)
-                        throw new IllegalStateException("PDF artifact persistence did not reach PARSED");
+                        throw new IllegalStateException("Parsed artifact persistence did not reach PARSED");
                 } else {
-                    // Non-PDF content and legacy messages without a generation retain their flow.
+                    // Only legacy messages without a generation retain incremental persistence.
                     parseService.parseAndSave(task.getFileMd5(), fileStream, legacyUser, legacyOrg, legacyPublic);
-                    if (contentTask) contentProcessing.parsed(task.getFileMd5(), generation);
                 }
                 log.info("文件解析完成，fileMd5: {}", task.getFileMd5());
             }
 
+            // Descriptions are durable per-Figure artifacts. PARSED retries reuse them,
+            // then regenerate embeddings and overwrite the same TEXT/FIGURE ES identities.
+            if (contentTask) {
+                if (!figureDescriptions.describe(task.getFileMd5(), generation)) return;
+                if (contentProcessing.checkpoint(task.getFileMd5(), generation) != FileContent.ProcessingStatus.PARSED)
+                    return;
+            }
+
             // 向量化处理
-            VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
-                    task.getFileMd5(),
-                    legacyUser,
-                    legacyOrg,
-                    legacyPublic,
-                    contentTask ? task.getRequesterId() : task.getUserId()
-            );
+            VectorizationService.VectorizationUsageResult vectorizationResult = contentTask
+                    ? vectorizationService.vectorizeWithUsage(task.getFileMd5(), generation,
+                            legacyUser, legacyOrg, legacyPublic, task.getRequesterId())
+                    : vectorizationService.vectorizeWithUsage(task.getFileMd5(),
+                            legacyUser, legacyOrg, legacyPublic, task.getUserId());
             if (contentTask) contentProcessing.indexed(task.getFileMd5(), generation, vectorizationResult);
             else documentService.markVectorizationCompleted(task.getFileMd5(), vectorizationResult);
             log.info("向量化完成，fileMd5: {}", task.getFileMd5());

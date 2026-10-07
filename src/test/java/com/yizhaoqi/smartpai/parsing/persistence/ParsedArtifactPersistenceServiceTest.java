@@ -108,6 +108,85 @@ class ParsedArtifactPersistenceServiceTest {
     }
 
     @Test
+    void modernNonPdfUsesRealTikaAndSameAtomicReplacementThenRetryKeepsTheRows() throws Exception {
+        var parser = tikaParser();
+        var service = proxy(new com.yizhaoqi.smartpai.parsing.NonPdfDocumentParsingService(parser, persistence));
+        assertTrue(service.parseAndPersist("abc123", 1, textInput(), permissions));
+        var rows = vectors.findByFileMd5OrderByChunkIdAsc("abc123");
+        assertFalse(rows.isEmpty());
+        assertEquals(java.util.stream.IntStream.rangeClosed(1, rows.size()).boxed().toList(),
+                rows.stream().map(DocumentVector::getChunkId).toList());
+        assertTrue(rows.stream().allMatch(row -> row.getPageNumber() == null));
+        assertEquals(0, figures.findByFileMd5("abc123").size());
+        assertParsed();
+        assertFalse(service.parseAndPersist("abc123", 1, textInput(), permissions));
+        assertEquals(rows.stream().map(DocumentVector::getVectorId).toList(),
+                vectors.findByFileMd5OrderByChunkIdAsc("abc123").stream().map(DocumentVector::getVectorId).toList());
+    }
+
+    @Test
+    void nonPdfInputFailureNeverTouchesOldArtifactsOrCheckpoint() {
+        var service = proxy(new com.yizhaoqi.smartpai.parsing.NonPdfDocumentParsingService(tikaParser(), persistence));
+        var failedInput = new java.io.InputStream() {
+            @Override public int read() throws IOException { throw new IOException("input failed during extraction"); }
+        };
+        assertThrows(Exception.class, () -> service.parseAndPersist("abc123", 1, failedInput, permissions));
+        assertOldArtifactsAndMerged();
+    }
+
+    @Test
+    void nonPdfCommitFailureRollsBackReplacementAndParsedTogether() {
+        var failingVectors = mock(DocumentVectorRepository.class, delegatesTo(vectors));
+        doAnswer(call -> { vectors.saveAll(call.getArgument(0)); throw new IllegalStateException("commit failed"); })
+                .when(failingVectors).saveAll(anyList());
+        var failingCommit = proxy(new ParsedArtifactPersistenceService(contents, failingVectors, figures, new ObjectMapper()));
+        var service = proxy(new com.yizhaoqi.smartpai.parsing.NonPdfDocumentParsingService(tikaParser(), failingCommit));
+        assertThrows(IllegalStateException.class, () -> service.parseAndPersist("abc123", 1, textInput(), permissions));
+        assertOldArtifactsAndMerged();
+    }
+
+    @Test
+    void slowOldNonPdfExtractionCannotReplaceNewGenerationArtifacts() throws Exception {
+        var parser = spy(tikaParser());
+        var extracted = new CountDownLatch(1); var release = new CountDownLatch(1);
+        doAnswer(call -> {
+            assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+            Object chunks = call.callRealMethod(); extracted.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS)); return chunks;
+        }).when(parser).parseToChunks(any());
+        var service = proxy(new com.yizhaoqi.smartpai.parsing.NonPdfDocumentParsingService(parser, persistence));
+        var worker = Executors.newSingleThreadExecutor();
+        try {
+            var old = worker.submit(() -> service.parseAndPersist("abc123", 1, textInput(), permissions));
+            assertTrue(extracted.await(10, TimeUnit.SECONDS));
+            transaction.executeWithoutResult(tx -> contents.findForUpdate("abc123").orElseThrow().setProcessingGeneration(2));
+            var currentChunks = List.of(new TextChunk(null, 1, "current generation body", "current generation"));
+            assertTrue(persistence.persist("abc123", 2, currentChunks, List.of(), permissions));
+            Long currentId = vectors.findByFileMd5("abc123").get(0).getVectorId();
+            release.countDown(); assertFalse(old.get(10, TimeUnit.SECONDS));
+            assertEquals(2, content().getProcessingGeneration()); assertParsed();
+            assertEquals(List.of(currentId), vectors.findByFileMd5("abc123").stream().map(DocumentVector::getVectorId).toList());
+            assertEquals("current generation body", vectors.findByFileMd5("abc123").get(0).getTextContent());
+        } finally { release.countDown(); worker.shutdownNow(); }
+    }
+
+    private com.yizhaoqi.smartpai.service.ParseService tikaParser() {
+        var parser = new com.yizhaoqi.smartpai.service.ParseService();
+        org.springframework.test.util.ReflectionTestUtils.setField(parser, "textChunker",
+                new com.yizhaoqi.smartpai.parsing.chunk.TextChunker(32, 4, 1));
+        org.springframework.test.util.ReflectionTestUtils.setField(parser, "bufferSize", 8192);
+        org.springframework.test.util.ReflectionTestUtils.setField(parser, "parentChunkSize", 1048576);
+        org.springframework.test.util.ReflectionTestUtils.setField(parser, "maxMemoryThreshold", 1.0);
+        // Deliberately no repository injected: modern extraction must never use one.
+        return parser;
+    }
+
+    private java.io.InputStream textInput() {
+        return new java.io.ByteArrayInputStream("First paragraph. Another sentence.\n\nSecond paragraph with useful text."
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
     void commitsCompleteReplacementAndParsedCheckpointTogether() throws Exception {
         assertTrue(persistence.persist("abc123", 1, chunks, List.of(prepared(1, 1)), permissions));
         List<DocumentVector> rows = vectors.findByFileMd5OrderByChunkIdAsc("abc123");
@@ -257,7 +336,7 @@ class ParsedArtifactPersistenceServiceTest {
             return "figures/abc123/1/page-1-figure-1.png";
         });
         DocumentParsingPersistenceCoordinator coordinator = proxy(new DocumentParsingPersistenceCoordinator(
-                new FileContentProcessingService(contents), images, persistence));
+                new FileContentProcessingService(contents, org.mockito.Mockito.mock(com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository.class)), images, persistence));
         assertThrows(IllegalStateException.class, () -> transaction.executeWithoutResult(tx -> {
             assertTrue(TransactionSynchronizationManager.isActualTransactionActive());
             try {
@@ -282,7 +361,7 @@ class ParsedArtifactPersistenceServiceTest {
             return "figures/abc123/1/page-1-figure-1.png";
         });
         DocumentParsingPersistenceCoordinator coordinator = proxy(new DocumentParsingPersistenceCoordinator(
-                new FileContentProcessingService(contents), images, persistence));
+                new FileContentProcessingService(contents, org.mockito.Mockito.mock(com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository.class)), images, persistence));
         ParsedDocumentArtifacts artifacts = new ParsedDocumentArtifacts(List.of(new ParsedPageContent(1, "正文")),
                 List.of(parsedFigure(1), parsedFigure(2)));
         assertThrows(IOException.class, () -> coordinator.persist("abc123", 1, artifacts, chunks, permissions));

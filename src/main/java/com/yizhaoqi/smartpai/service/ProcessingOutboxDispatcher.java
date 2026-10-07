@@ -40,6 +40,21 @@ public class ProcessingOutboxDispatcher {
         for (ProcessingOutbox event : outbox.findByStatusOrderByIdAsc(ProcessingOutbox.Status.PENDING,
                 PageRequest.of(0, Math.max(1, batchSize)))) {
             try {
+                if (FileProcessingTask.TASK_TYPE_ACL_CHANGED.equals(event.getEventType())) {
+                    AclChangedPayload acl = mapper.readValue(event.getPayload(), AclChangedPayload.class);
+                    FileProcessingTask task = new FileProcessingTask();
+                    task.setTaskType(event.getEventType()); task.setEventId(event.getEventId());
+                    task.setFileMd5(event.getFileMd5()); task.setUserId(acl.deletedUserId());
+                    if (!task.hasValidAclIdentity() || !event.getEventId().equals(acl.eventId())
+                            || !event.getFileMd5().equals(acl.fileMd5()))
+                        throw new IllegalArgumentException("Invalid ACL outbox identity");
+                    kafka.executeInTransaction(template -> {
+                        template.send(kafkaConfig.getFileProcessingTopic(), event.getFileMd5(), task);
+                        return true;
+                    });
+                    status.markSent(event.getId());
+                    continue;
+                }
                 ProcessingOutboxPayload payload = mapper.readValue(event.getPayload(), ProcessingOutboxPayload.class);
                 if (!FileProcessingTask.TASK_TYPE_PROCESS_CONTENT.equals(event.getEventType())
                         || !event.getEventId().equals(payload.eventId())

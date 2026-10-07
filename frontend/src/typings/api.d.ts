@@ -412,13 +412,23 @@ declare namespace Api {
       fileName: string;
       pageNumber?: number | null;
       anchorText?: string | null;
-      retrievalMode?: 'HYBRID' | 'TEXT_ONLY' | null;
+      retrievalMode?: 'HYBRID' | 'TEXT_ONLY' | 'VECTOR_ONLY' | null;
       retrievalLabel?: string | null;
       retrievalQuery?: string | null;
       matchedChunkText?: string | null;
       evidenceSnippet?: string | null;
       score?: number | null;
       chunkId?: number | null;
+      entryId?: string | null;
+      documentType?: 'TEXT' | 'FIGURE' | null;
+      processingGeneration?: number | null;
+      figureIndex?: number | null;
+      figureLabel?: string | null;
+      bbox?: number[] | null;
+      caption?: string | null;
+      description?: string | null;
+      ocrText?: string | null;
+      degraded?: boolean | null;
     }
 
     interface Input {
@@ -452,6 +462,7 @@ declare namespace Api {
       referenceMappings?: Record<string, ReferenceEvidence>;
       toolEvents?: AgentToolEvent[];
       feedbackRating?: 'good' | 'bad';
+      retrievalStatus?: 'OK' | 'EMPTY' | 'DEGRADED' | 'FAILED';
     }
 
     interface Token {

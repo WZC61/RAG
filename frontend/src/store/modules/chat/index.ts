@@ -1,5 +1,6 @@
 import { useWebSocket } from '@vueuse/core';
 import { request } from '@/service/request';
+import { sanitizeReferenceMappings } from '@/utils/references';
 
 export const useChatStore = defineStore(SetupStoreId.Chat, () => {
   const NON_RETRYABLE_CLOSE_CODES = new Set([1002, 1003, 1007, 1008]);
@@ -77,7 +78,7 @@ export const useChatStore = defineStore(SetupStoreId.Chat, () => {
       assistant.conversationId = snapshot.conversationId;
       assistant.timestamp ||= snapshot.updatedAt;
       if (snapshot.referenceMappings && Object.keys(snapshot.referenceMappings).length > 0) {
-        assistant.referenceMappings = snapshot.referenceMappings;
+        assistant.referenceMappings = sanitizeReferenceMappings(snapshot.referenceMappings);
       }
       return;
     }
@@ -96,7 +97,7 @@ export const useChatStore = defineStore(SetupStoreId.Chat, () => {
       conversationId: snapshot.conversationId,
       generationId: snapshot.generationId,
       timestamp: snapshot.updatedAt,
-      referenceMappings: snapshot.referenceMappings
+      referenceMappings: sanitizeReferenceMappings(snapshot.referenceMappings)
     });
   }
 
@@ -191,7 +192,7 @@ export const useChatStore = defineStore(SetupStoreId.Chat, () => {
       params: { conversationId: cid }
     });
     if (!error && data) {
-      list.value = data;
+      list.value = data.map(message => ({ ...message, referenceMappings: sanitizeReferenceMappings(message.referenceMappings) }));
     }
   }
 

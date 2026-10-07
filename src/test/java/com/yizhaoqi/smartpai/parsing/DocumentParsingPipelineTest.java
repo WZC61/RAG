@@ -7,6 +7,7 @@ import com.yizhaoqi.smartpai.parsing.chunk.ParsedDocumentChunker;
 import com.yizhaoqi.smartpai.parsing.chunk.TextChunker;
 import com.yizhaoqi.smartpai.parsing.model.*;
 import com.yizhaoqi.smartpai.parsing.persistence.*;
+import com.yizhaoqi.smartpai.parsing.description.FigureDescriptionService;
 import com.yizhaoqi.smartpai.repository.*;
 import com.yizhaoqi.smartpai.service.*;
 import org.junit.jupiter.api.*;
@@ -107,7 +108,7 @@ class DocumentParsingPipelineTest {
             return "figures/md5/1/page-1-figure-1.png";
         });
         vectorization = mock(VectorizationService.class);
-        when(vectorization.vectorizeWithUsage("md5", "1", "TEAM_A", true, "1")).thenReturn(usage);
+        when(vectorization.vectorizeWithUsage("md5", 1L, "1", "TEAM_A", true, "1")).thenReturn(usage);
         legacy = mock(ParseService.class);
         pp = path -> result();
         calls = 0;
@@ -115,7 +116,7 @@ class DocumentParsingPipelineTest {
     }
 
     private void pipeline(DocumentFigureRepository figureRows) {
-        FileContentProcessingService checkpoint = proxy(new FileContentProcessingService(contents));
+        FileContentProcessingService checkpoint = proxy(new FileContentProcessingService(contents, org.mockito.Mockito.mock(com.yizhaoqi.smartpai.repository.ProcessingOutboxRepository.class)));
         ParsedArtifactPersistenceService persistence = proxy(new ParsedArtifactPersistenceService(contents, vectors, figureRows, new ObjectMapper()));
         DocumentParsingPersistenceCoordinator coordinator = proxy(new DocumentParsingPersistenceCoordinator(checkpoint, images, persistence));
         DocumentParsingService parsing = proxy(new DocumentParsingService(() -> path -> {
@@ -128,11 +129,15 @@ class DocumentParsingPipelineTest {
         ReflectionTestUtils.setField(consumer, "contentProcessing", checkpoint);
         ReflectionTestUtils.setField(consumer, "files", files);
         ReflectionTestUtils.setField(consumer, "parsingService", parsing);
+        FigureDescriptionService descriptions = mock(FigureDescriptionService.class);
+        try { when(descriptions.describe(anyString(), anyLong())).thenReturn(true); }
+        catch (IOException impossible) { throw new AssertionError(impossible); }
+        ReflectionTestUtils.setField(consumer, "figureDescriptions", descriptions);
     }
 
     @Test
     void pdfCommitsAllArtifactsBeforeExistingVectorizationAndReachesIndexed() {
-        when(vectorization.vectorizeWithUsage("md5", "1", "TEAM_A", true, "1")).thenAnswer(invocation -> {
+        when(vectorization.vectorizeWithUsage("md5", 1L, "1", "TEAM_A", true, "1")).thenAnswer(invocation -> {
             assertEquals(FileContent.ProcessingStatus.PARSED, content().getProcessingStatus());
             assertEquals(2, vectors.countByFileMd5("md5"));
             DocumentFigure figure = figures.findByFileMd5("md5").get(0);
@@ -181,7 +186,7 @@ class DocumentParsingPipelineTest {
 
     @Test
     void vectorizationRetryReusesParsedRowsWithoutAnotherPpCallOrDownload() {
-        when(vectorization.vectorizeWithUsage("md5", "1", "TEAM_A", true, "1"))
+        when(vectorization.vectorizeWithUsage("md5", 1L, "1", "TEAM_A", true, "1"))
                 .thenThrow(new IllegalStateException("vectorization failed")).thenReturn(usage);
         assertThrows(RuntimeException.class, () -> consumer.processTask(task));
         assertEquals(FileContent.ProcessingStatus.PARSED, content().getProcessingStatus());

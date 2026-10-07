@@ -10,17 +10,22 @@ import org.springframework.stereotype.Component;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.indices.CreateIndexRequest;
 import co.elastic.clients.elasticsearch.indices.ExistsRequest;
+import co.elastic.clients.elasticsearch.indices.PutMappingRequest;
+import co.elastic.clients.elasticsearch.indices.GetMappingRequest;
+import co.elastic.clients.elasticsearch._types.mapping.Property;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.http.ConnectionClosedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.io.StringReader;
 import java.net.ConnectException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
 
 // 确保在 BootstrapKnowledgeInitializer 之前进行初始化
 @Order(2)
@@ -85,7 +90,9 @@ public class EsIndexInitializer implements CommandLineRunner {
         if (!existsResponse.value()) {
             createIndex();
         } else {
-            logger.info("索引 'knowledge_base' 已存在");
+            // PUT mapping adds the multimodal fields to existing development indexes.
+            // It does not rewrite historical documents or change incompatible existing types.
+            updateExistingMapping();
         }
     }
 
@@ -95,10 +102,7 @@ public class EsIndexInitializer implements CommandLineRunner {
      */
     private void createIndex() throws Exception {
         // 读取 JSON 文件内容，使用 InputStream 方式支持 JAR 包内资源
-        String mappingJson;
-        try (var inputStream = mappingResource.getInputStream()) {
-            mappingJson = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
-        }
+        String mappingJson = readMappingJson();
         // 创建索引并应用映射
         CreateIndexRequest createIndexRequest = CreateIndexRequest.of(c -> c
                 .index("knowledge_base") // 索引名称
@@ -106,6 +110,38 @@ public class EsIndexInitializer implements CommandLineRunner {
         );
         esClient.indices().create(createIndexRequest);
         logger.info("索引 'knowledge_base' 已创建");
+    }
+
+    private String readMappingJson() throws Exception {
+        try (var inputStream = mappingResource.getInputStream()) {
+            return new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private void updateExistingMapping() throws Exception {
+        String mappings = new ObjectMapper().readTree(readMappingJson()).path("mappings").toString();
+        Map<String, Property> expected = PutMappingRequest.of(request -> request
+                .index("knowledge_base").withJson(new StringReader(mappings))).properties();
+        var record = esClient.indices().getMapping(GetMappingRequest.of(request -> request.index("knowledge_base")))
+                .result().get("knowledge_base");
+        if (record == null) throw new IllegalStateException("knowledge_base mapping is missing");
+        Map<String, Property> current = record.mappings().properties();
+        Map<String, Property> additions = new LinkedHashMap<>();
+        for (var field : expected.entrySet()) {
+            Property existing = current.get(field.getKey());
+            if (existing == null) additions.put(field.getKey(), field.getValue());
+            else if (existing._kind() != field.getValue()._kind())
+                throw new IllegalStateException("knowledge_base mapping type conflict: " + field.getKey());
+            else if (existing.isDenseVector() && !Objects.equals(existing.denseVector().dims(), field.getValue().denseVector().dims()))
+                throw new IllegalStateException("knowledge_base dense_vector dims conflict: " + field.getKey());
+        }
+        // Existing text analyzers/index flags cannot be changed via PUT mapping. Preserve them.
+        if (!additions.isEmpty()) {
+            var response = esClient.indices().putMapping(PutMappingRequest.of(request -> request
+                    .index("knowledge_base").properties(additions)));
+            if (!response.acknowledged()) throw new IllegalStateException("knowledge_base mapping update was not acknowledged");
+        }
+        logger.info("索引 'knowledge_base' 已存在，补充 {} 个 mapping 字段", additions.size());
     }
 
     private String buildDiagnosticMessage(Exception exception) {

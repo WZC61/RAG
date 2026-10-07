@@ -1,5 +1,6 @@
 package com.yizhaoqi.smartpai.config;
 
+import com.yizhaoqi.smartpai.service.SharedContentAclService;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -26,7 +27,6 @@ import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.util.backoff.FixedBackOff;
-
 import java.util.HashMap;
 import java.util.Map;
 import java.util.LinkedHashMap;
@@ -135,13 +135,14 @@ public class KafkaConfig {
 
     @Bean
     public ConsumerRecordRecoverer fileProcessingRecoverer(KafkaTemplate<String, Object> kafkaTemplate,
-                                                          FileContentProcessingService contents) {
+                                                          FileContentProcessingService contents,
+                                                          SharedContentAclService acl) {
         // 当重试失败后，消息发送至 file-processing-dlt 主题，分区与原消息保持一致
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
                 kafkaTemplate,
                 (record, ex) -> new TopicPartition(fileProcessingDltTopic, record.partition()));
         recoverer.setFailIfSendResultIsError(true);
-        return new FileProcessingDltRecoverer(recoverer, contents);
+        return new FileProcessingDltRecoverer(recoverer, contents, acl);
     }
 
     // Same-key partition order handles normal duplicates. Extreme rebalance overlap is accepted;

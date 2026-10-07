@@ -1,5 +1,5 @@
 import 'vue-markdown-shiki/style';
-import markdownPlugin from '@/vendor/vue-markdown-shiki';
+import markdownPlugin, { safeMarkdownOptions } from '@/vendor/vue-markdown-shiki';
 import './plugins/assets';
 import { setupAppVersionNotification, setupDayjs, setupIconifyOffline, setupLoading, setupNProgress } from './plugins';
 import { setupStore } from './store';
@@ -25,7 +25,7 @@ async function setupApp() {
 
   setupAppVersionNotification();
 
-  app.use(markdownPlugin);
+  app.use(markdownPlugin, safeMarkdownOptions);
 
   app.mount('#app');
 }

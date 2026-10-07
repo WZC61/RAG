@@ -34,8 +34,50 @@
       "orgTag": {
         "type": "keyword"
       },
-      "isPublic": {
+      "public": {
         "type": "boolean"
+      },
+      "documentType": {
+        "type": "keyword"
+      },
+      "processingGeneration": {
+        "type": "long"
+      },
+      "figureIndex": {
+        "type": "integer"
+      },
+      "figureLabel": {
+        "type": "keyword"
+      },
+      "imagePath": {
+        "type": "keyword",
+        "index": false
+      },
+      "bbox": {
+        "type": "double",
+        "index": false
+      },
+      "caption": {
+        "type": "text",
+        "index": false
+      },
+      "description": {
+        "type": "text",
+        "index": false
+      },
+      "ocrText": {
+        "type": "text",
+        "index": false
+      },
+      "nearbyText": {
+        "type": "text",
+        "index": false
+      },
+      "allowedUserIds": {
+        "type": "keyword"
+      },
+      "allowedOrgTags": {
+        "type": "keyword"
       }
     }
   }

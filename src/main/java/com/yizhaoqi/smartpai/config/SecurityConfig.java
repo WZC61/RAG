@@ -10,6 +10,7 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 
 /**
  * 配置Spring Security的类
@@ -41,6 +42,13 @@ public class SecurityConfig {
         try {
             // 禁用CSRF保护
             http.csrf(csrf -> csrf.disable())
+                    .exceptionHandling(errors -> errors.defaultAuthenticationEntryPointFor((request, response, error) -> {
+                        response.setStatus(401);
+                        response.setCharacterEncoding("UTF-8");
+                        response.setContentType("application/json");
+                        response.setHeader("Cache-Control", "no-store");
+                        response.getWriter().write("{\"code\":401,\"message\":\"Authentication required\"}");
+                    }, new AntPathRequestMatcher("/api/v1/documents/figures/**")))
                     // 配置请求的授权规则
                     .authorizeHttpRequests(authorize -> authorize
                             // 允许静态资源访问

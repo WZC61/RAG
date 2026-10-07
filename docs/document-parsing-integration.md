@@ -67,7 +67,7 @@ PP-StructureV3 PDF 主链已完成真实联调（2026-10-04）：
   保存为稳定 `.jpg` 路径；MinIO 对象均存在且非空，Content-Type 为 image/jpeg。
 - document_figures 元数据持久化成功，MERGED → PARSED → INDEXED 链路成功；
   Outbox 最终为 SENT，processingError 为空。
-- Figure description 和 Figure Embedding 不在本阶段范围内。
+- 上述记录是解析阶段的真实联调；随后多模态索引已接入 PROCESS_CONTENT，见 [多模态索引](multimodal-indexing.md)。
 
 ## 重复联调步骤
 
@@ -90,8 +90,9 @@ PP-StructureV3 PDF 主链已完成真实联调（2026-10-04）：
    figures/{fileMd5}/{generation}/ 下图片能打开。description 此阶段仍为 null。
 
 成功标准：正文和所有识别出的 Figure 都可靠保存后才进入 PARSED，随后现有正文向量化完成；
-PDF 消费链没有 LiteParse 完整解析，临时 PDF 在消费结束后消失。Figure description/Embedding
-仍不在本轮范围。错误应保留阶段 checkpoint 和 processingError，由现有 retry / DLT 处理。
+PDF 消费链没有 LiteParse 完整解析，临时 PDF 在消费结束后消失。解析提交时 description 可以为空；
+随后 PARSED 分支生成 description、Text/Figure Embedding，并在 ES 全部成功后提交 INDEXED。
+错误保留阶段 checkpoint 和 processingError，由现有 retry / DLT 处理。
 
 ## 保留边界
 
